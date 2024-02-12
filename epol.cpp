@@ -845,7 +845,7 @@ int servers::fillInfos(void)
 #include <sys/time.h>
 #include <fcntl.h>
 #include <sys/stat.h>
-// #include <sys/epoll.h>
+#include <sys/epoll.h>
 
 #define MAX_CLIENTS 30
 
@@ -876,7 +876,11 @@ class Server
         int client_socket[MAX_CLIENTS];
         std::map<int, HTTPRequest> requests;
         informations serverConfig;
+        int epoll_fd;
+        static const int MAX_EVENTS = 10;
     public:
+        void setupEpoll();
+        void run();
         Server();
         Server(informations config);
         int createSocket();
@@ -1542,117 +1546,218 @@ void Server::handleRequestDELETE(int clientSocket, HTTPRequest& request, informa
 }
 
 
-void Server::handleConnections()
-{
-    fd_set read_fds;
-    struct timeval tv;
-    int max_sd;
+// void Server::handleConnections()
+// {
+//     fd_set read_fds;
+//     struct timeval tv;
+//     int max_sd;
 
-    while(true)
-    {
-        FD_ZERO(&read_fds);
-        if (sockfd > FD_SETSIZE)
-            exitWithError("fuckyou..");
-        FD_SET(sockfd, &read_fds);
-        max_sd = sockfd;
+//     while(true)
+//     {
+//         FD_ZERO(&read_fds);
+//         if (sockfd > FD_SETSIZE)
+//             exitWithError("fuckyou..");
+//         FD_SET(sockfd, &read_fds);
+//         max_sd = sockfd;
 
-        for (int i = 0; i < MAX_CLIENTS; i++)
-        {
-            int sd = client_socket[i];
-            if (sd > 0)
-            {
-                if (sd > FD_SETSIZE)
-                    exitWithError("fuckyou");
-                FD_SET(sd, &read_fds);
-            }
-            if (sd > max_sd)
-                max_sd = sd;
-        }
+//         for (int i = 0; i < MAX_CLIENTS; i++)
+//         {
+//             int sd = client_socket[i];
+//             if (sd > 0)
+//             {
+//                 if (sd > FD_SETSIZE)
+//                     exitWithError("fuckyou");
+//                 FD_SET(sd, &read_fds);
+//             }
+//             if (sd > max_sd)
+//                 max_sd = sd;
+//         }
 
-        tv.tv_sec = 5;
-        tv.tv_usec = 0;
+//         tv.tv_sec = 5;
+//         tv.tv_usec = 0;
 
-        int activity = select(max_sd + 1, &read_fds, NULL, NULL, &tv);
-        if ((activity < 0) && (errno != EINTR))
-            exitWithError("Select error");
+//         int activity = select(max_sd + 1, &read_fds, NULL, NULL, &tv);
+//         if ((activity < 0) && (errno != EINTR))
+//             exitWithError("Select error");
 
-        if (FD_ISSET(sockfd, &read_fds))
-        {
-            struct sockaddr_in clientAddr;
-            socklen_t clientAddrLen = sizeof(clientAddr);
-            int new_socket = accept(sockfd, (struct sockaddr *)&clientAddr, &clientAddrLen);
-            std::cout << "new_client: " << new_socket << std::endl;
-            if (new_socket < 0)
-                exitWithError("Accept failed");
-            // fcntl(new_socket, F_SETFL, O_NONBLOCK);
-            std::cout << "new_client: " << new_socket << std::endl;
-            for (int i = 0; i < MAX_CLIENTS; i++)
-            {
-                if (client_socket[i] == 0)
-                {
-                    std::cout << "new_client: " << new_socket << std::endl;
-                    client_socket[i] = new_socket;
-                    requests[new_socket] = HTTPRequest();
-                    break ;
-                }
-            }
-            std::cout << "new_client: " << new_socket << std::endl;
-        }
+//         if (FD_ISSET(sockfd, &read_fds))
+//         {
+//             struct sockaddr_in clientAddr;
+//             socklen_t clientAddrLen = sizeof(clientAddr);
+//             int new_socket = accept(sockfd, (struct sockaddr *)&clientAddr, &clientAddrLen);
+//             std::cout << "new_client: " << new_socket << std::endl;
+//             if (new_socket < 0)
+//                 exitWithError("Accept failed");
+//             // fcntl(new_socket, F_SETFL, O_NONBLOCK);
+//             std::cout << "new_client: " << new_socket << std::endl;
+//             for (int i = 0; i < MAX_CLIENTS; i++)
+//             {
+//                 if (client_socket[i] == 0)
+//                 {
+//                     std::cout << "new_client: " << new_socket << std::endl;
+//                     client_socket[i] = new_socket;
+//                     requests[new_socket] = HTTPRequest();
+//                     break ;
+//                 }
+//             }
+//             std::cout << "new_client: " << new_socket << std::endl;
+//         }
 
-        for (int i = 0; i < MAX_CLIENTS; i++)
-        {
-            int sd = client_socket[i];
-            if (sd > 0)
-                std::cout << "ana kbar mn 0: " << sd << std::endl;
-            if (FD_ISSET(sd, &read_fds))
-            {
-                std::cout << "ana 9dart ndkhol" << std::endl;
-                char buffer[1024] = {0};
-                std::cout << "befor read" << std::endl;
-                int valread = read(sd, buffer, sizeof(buffer));
-                std::cout << "after read" << std::endl;
-                if (valread > 0)
-                {
-                    std::cout << "befor appened" << std::endl;
-                    requests[sd].appendData(buffer, valread);
-                    std::cout << "rawrequest: " << requests[sd].rawRequest << std::endl;
-                    std::cout << "after appened" << std::endl;
-                    if (requests[sd].isComplete())
-                    {
-                        try
-                        {
-                            std::cout << "hello\n"<< std::endl;
-                            requests[sd].parse(requests[sd].rawRequest);
-                            std::cout << "++++++++++URI: " << requests[sd].uri << std::endl;
-                            std::cout << "request: " << requests[sd].getFullRequest() << std::endl;
+//         for (int i = 0; i < MAX_CLIENTS; i++)
+//         {
+//             int sd = client_socket[i];
+//             if (sd > 0)
+//                 std::cout << "ana kbar mn 0: " << sd << std::endl;
+//             if (FD_ISSET(sd, &read_fds))
+//             {
+//                 std::cout << "ana 9dart ndkhol" << std::endl;
+//                 char buffer[1024] = {0};
+//                 std::cout << "befor read" << std::endl;
+//                 int valread = read(sd, buffer, sizeof(buffer));
+//                 std::cout << "after read" << std::endl;
+//                 if (valread > 0)
+//                 {
+//                     std::cout << "befor appened" << std::endl;
+//                     requests[sd].appendData(buffer, valread);
+//                     std::cout << "rawrequest: " << requests[sd].rawRequest << std::endl;
+//                     std::cout << "after appened" << std::endl;
+//                     if (requests[sd].isComplete())
+//                     {
+//                         try
+//                         {
+//                             std::cout << "hello\n"<< std::endl;
+//                             requests[sd].parse(requests[sd].rawRequest);
+//                             std::cout << "++++++++++URI: " << requests[sd].uri << std::endl;
+//                             std::cout << "request: " << requests[sd].getFullRequest() << std::endl;
 
-                            if (requests[sd].method == "GET")
-                                handleRequestGET(sd ,requests[sd], serverConfig);
-                            else if (requests[sd].method == "POST")
-                                handleRequestPOST(sd ,requests[sd]);
-                            else if (requests[sd].method == "DELETE")
-                                    handleRequestDELETE(sd, requests[sd], serverConfig);
-                            else
-                                sendErrorResponse(sd, 501, "Not Implemented");
+//                             if (requests[sd].method == "GET")
+//                                 handleRequestGET(sd ,requests[sd], serverConfig);
+//                             else if (requests[sd].method == "POST")
+//                                 handleRequestPOST(sd ,requests[sd]);
+//                             else if (requests[sd].method == "DELETE")
+//                                     handleRequestDELETE(sd, requests[sd], serverConfig);
+//                             else
+//                                 sendErrorResponse(sd, 501, "Not Implemented");
                 
-                            std::string response = "HTTP/1.1 200 OK\r\n";
-                            response += "Content-Type: \r\n";
-                            response += "Content-Length: 10\r\n";
-                            response += "\r\nhhhhhhhhhhhhhhn";
-                            send(sd, response.c_str(), response.size(), 0);
-                            requests[sd].clear(); // Clear the request for future use
-                        }
-                        catch (std::runtime_error& e)
-                        {
-                            std::cout << e.what() << std::endl;
+//                             std::string response = "HTTP/1.1 200 OK\r\n";
+//                             response += "Content-Type: \r\n";
+//                             response += "Content-Length: 10\r\n";
+//                             response += "\r\nhhhhhhhhhhhhhhn";
+//                             send(sd, response.c_str(), response.size(), 0);
+//                             requests[sd].clear(); // Clear the request for future use
+//                         }
+//                         catch (std::runtime_error& e)
+//                         {
+//                             std::cout << e.what() << std::endl;
+//                         }
+//                     }
+//                 }
+//                 else if (valread == 0 || (valread < 0 && errno != EAGAIN && errno != EWOULDBLOCK))
+//                 {
+//                     close(sd);
+//                     client_socket[i] = 0;
+//                     requests.erase(sd); // Remove the request from map
+//                 }
+//             }
+//         }
+//     }
+// }
+
+void setNonBlocking(int sock)
+{
+	int flags = fcntl(sock, F_GETFL, 0);
+	if (flags == -1)
+	{
+		perror("fcntl F_GETFL");
+		exit(EXIT_FAILURE);
+	}
+	if (fcntl(sock, F_SETFL, flags | O_NONBLOCK) == -1)
+	{
+		perror("fcntl F_SETFL , O_NONBLCOK");
+		exit(EXIT_FAILURE);
+	}
+}
+
+void Server::run()
+{
+    struct epoll_event ev, events[MAX_EVENTS];
+
+    // Create epoll file descriptor
+    epoll_fd = epoll_create1(0);
+    if (epoll_fd == -1) {
+        perror("epoll_create1");
+        exit(EXIT_FAILURE);
+    }
+
+    // Add listening socket to the interest list of epoll
+    ev.events = EPOLLIN;
+    ev.data.fd = sockfd;
+    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sockfd, &ev) == -1) {
+        perror("epoll_ctl: listen_sock");
+        exit(EXIT_FAILURE);
+    }
+
+    while (true) {
+        int nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
+        if (nfds == -1) {
+            perror("epoll_wait");
+            exit(EXIT_FAILURE);
+        }
+
+        for (int n = 0; n < nfds; ++n) {
+            int current_fd = events[n].data.fd;
+            if (current_fd == sockfd)
+            {
+                // Handle new connection
+                struct sockaddr_in clientAddr;
+                socklen_t clientAddrLen = sizeof(clientAddr);
+                int new_socket = accept(sockfd, (struct sockaddr *)&clientAddr, &clientAddrLen);
+                if (new_socket < 0) {
+                    perror("accept");
+                    continue;
+                }
+                setNonBlocking(new_socket);
+                ev.events = EPOLLIN | EPOLLET;
+                ev.data.fd = new_socket;
+                if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, new_socket, &ev) == -1) {
+                    perror("epoll_ctl: new_socket");
+                    close(new_socket);
+                }
+                client_socket[new_socket] = new_socket;
+                requests[new_socket] = HTTPRequest();
+            }
+            else
+            {
+                // Handle IO on existing connection
+                char buffer[1024] = {0};
+                int valread = read(current_fd, buffer, sizeof(buffer));
+                if (valread > 0) {
+                    requests[current_fd].appendData(buffer, valread);
+                    if (requests[current_fd].isComplete()) {
+                        try {
+                            requests[current_fd].parse(requests[current_fd].rawRequest);
+                            if (requests[current_fd].method == "GET") {
+                                handleRequestGET(current_fd, requests[current_fd], serverConfig);
+                            } else if (requests[current_fd].method == "POST") {
+                                handleRequestPOST(current_fd, requests[current_fd]);
+                            } else if (requests[current_fd].method == "DELETE") {
+                                handleRequestDELETE(current_fd, requests[current_fd], serverConfig);
+                            } else {
+                                sendErrorResponse(current_fd, 501, "Not Implemented");
+                            }
+                            requests[current_fd].clear();
+                        } catch (std::runtime_error& e) {
+                            sendErrorResponse(current_fd, 400, e.what());
                         }
                     }
                 }
-                else if (valread == 0 || (valread < 0 && errno != EAGAIN && errno != EWOULDBLOCK))
+                else
                 {
-                    close(sd);
-                    client_socket[i] = 0;
-                    requests.erase(sd); // Remove the request from map
+                    if (valread == 0 || (valread < 0 && (errno != EAGAIN && errno != EWOULDBLOCK))) {
+                        close(current_fd);
+                        client_socket[n] = -1;
+                        requests.erase(current_fd);
+                    }
                 }
             }
         }
@@ -1660,24 +1765,21 @@ void Server::handleConnections()
 }
 
 
-
-int main(int ac, char **av)
-{
-    try
-    {
-        configFile cFile(ac, av);
-        servers    start(cFile);
+int main(int argc, char **argv) {
+    try {
+        configFile cFile(argc, argv);
+        servers start(cFile);
         informations config = start.getServerInfo(0); // Implement getServerInfo in the servers class
         Server myServer(config);
         myServer.createSocket();
         myServer.bindSocket(8080, "127.0.0.1");
         myServer.listenToSocket();
-        std::cout << "=========================================================================\n";
-        myServer.handleConnections();
+        std::cout << "Server is running..." << std::endl;
+        myServer.run();
+    } catch (std::exception& e) {
+        std::cerr << "Error: " << e.what() << std::endl;
+        return EXIT_FAILURE;
     }
-    catch(std::exception& e)
-    {
-        std::cout << e.what() << std::endl;
-    }
-    return 0;
+    return EXIT_SUCCESS;
 }
+

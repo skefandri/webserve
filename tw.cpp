@@ -553,9 +553,18 @@ servers::servers(configFile &cFile)
         if (!checker)
             needed += removeWhiteSpaces(buffer);
     }
+    // std::cout << "All Things\n" << all << std::endl;
+    // std::cout << "What We Need\n" << needed << std::endl;
+    // std::cout << "-------------------------------------------" << std::endl;
     std::cout << "I will Isolate Servers" << std::endl;
     if (this->isolateServers(needed))
         throw BadConetent();
+    // for (size_t i = 0; i < this->server.size(); i++)
+    // {
+    //     std::cout << "Server Number " << i << ":\n"
+    //     << this->server[i] << std::endl;
+    // }
+    //std::cout << "--------------------------------------------" << std::endl;
     std::cout << "I will Fill Infos" << std::endl;
     if (this->fillInfos())
         throw BadConetent();
@@ -844,8 +853,6 @@ int servers::fillInfos(void)
 #include <fstream>
 #include <sys/time.h>
 #include <fcntl.h>
-#include <sys/stat.h>
-// #include <sys/epoll.h>
 
 #define MAX_CLIENTS 30
 
@@ -897,9 +904,8 @@ class Server
         void handleExistingConnections(fd_set& read_fds);
         void initializeFileDescriptorSet(fd_set& read_fds, int& max_sd);
         void processRequest(int clientSocket, HTTPRequest& request);
-        bool isDirectory(const std::string& path);
-        std::string generateDirectoryListing(const std::string& path);
 };
+
 
 Server::Server()
 {
@@ -910,6 +916,7 @@ Server::Server(informations config) : serverConfig(config)
 {
     memset(client_socket, 0, sizeof(client_socket));
 }
+
 
 void Server::setConfig(const informations& config)
 {
@@ -946,7 +953,7 @@ void Server::bindSocket(int port, const std::string& ip)
 
 void Server::listenToSocket()
 {
-    if (listen(sockfd, 24) < 0)
+    if (listen(sockfd, 3) < 0)
         exitWithError("Failed to Listen To Socket");
 }
 
@@ -958,18 +965,23 @@ bool readLine(std::istringstream& requestStream, std::string& line)
     return requestStream.good();
 }
 
+std::string to_string(int value)
+{
+    std::ostringstream os;
+    os << value;
+    return os.str();
+}
 HTTPRequest::HTTPRequest() : method(""), uri(""), httpVersion(""), body(""), rawRequest("") {}
 
 
-void toLowerCase(std::string& s)
-{
-    for (size_t i = 0; i < s.length(); ++i)
+void toLowerCase(std::string& s) {
+    for (size_t i = 0; i < s.length(); ++i) {
         s[i] = std::tolower(s[i]);
+    }
 }
 
 
-void HTTPRequest::parse(std::string& rawRequest)
-{
+void HTTPRequest::parse(std::string& rawRequest) {
     std::istringstream requestStream(rawRequest);
     std::string line;
     std::cout << "from Parse pro\n";
@@ -978,7 +990,7 @@ void HTTPRequest::parse(std::string& rawRequest)
     std::istringstream requestLineStream(line);
     if (!(requestLineStream >> method >> uri >> httpVersion))
         throw std::runtime_error("Wrong request line");
-    std::cout << "===uri: " << uri << std::endl;
+
     size_t queryPos = uri.find('?');
     if (queryPos != std::string::npos) {
         std::string queryString = uri.substr(queryPos + 1);
@@ -997,10 +1009,9 @@ void HTTPRequest::parse(std::string& rawRequest)
     {
         std::istringstream headerLineStream(line);
         std::string key, value;
-        if (std::getline(headerLineStream, key, ':') && std::getline(headerLineStream, value))
-        {
+        if (std::getline(headerLineStream, key, ':') && std::getline(headerLineStream, value)) {
             toLowerCase(key);
-            headers[key].push_back(value.substr(value.find_first_not_of(" ")));
+            headers[key].push_back(value.substr(value.find_first_not_of(" "))); // Trim leading whitespace
         }
         else
             throw std::runtime_error("Wrong header line");
@@ -1015,8 +1026,7 @@ void HTTPRequest::parse(std::string& rawRequest)
     if (contentLengthHeaderFound)
     {
         int length = std::atoi(headers["content-length"][0].c_str());
-        if (length > 0)
-        {
+        if (length > 0) {
             std::vector<char> buffer(length);
             requestStream.read(&buffer[0], length);
             body.assign(buffer.begin(), buffer.end());
@@ -1024,8 +1034,7 @@ void HTTPRequest::parse(std::string& rawRequest)
     }
     else if (transferEncodingHeaderFound && headers["transfer-encoding"][0] == "chunked")
     {
-        while (true)
-        {
+        while (true) {
             std::string chunkSizeStr;
             std::getline(requestStream, chunkSizeStr);
             unsigned int chunkSize;
@@ -1077,7 +1086,7 @@ bool HTTPRequest::isComplete()
         {
             size_t start = contentLengthHeader + 16; // Length of "Content-Length: "
             size_t end = this->rawRequest.find("\r\n", start);
-            int contentLength = std::stoi(this->rawRequest.substr(start, end - start));
+            int contentLength = std::atoi(this->rawRequest.substr(start, end - start).c_str());
 
             // Check if the body length is equal to the Content-Length value
             size_t bodyStart = headerEnd + 4; // Length of "\r\n\r\n"
@@ -1085,10 +1094,15 @@ bool HTTPRequest::isComplete()
                 return false; // The body is not fully received
         }
     }
-
     return true; // Headers and body (if applicable) are fully received
 }
 
+bool isRequestComplete(std::string& rawRequest)
+{
+    if (rawRequest.find("\r\n\r\n") != std::string::npos)
+        return true;
+    return false;
+}
 
 void HTTPRequest::clear()
 {
@@ -1119,13 +1133,6 @@ std::string HTTPRequest::getFullRequest() const
         fullRequest += "Body:\n" + body;
         return fullRequest;
 }
-
-
-
-
-
-
-
 
 struct FormDataPart
 {
@@ -1385,7 +1392,6 @@ std::string Server::mapUriToFilePath(std::string& uri, location& routeConfig)
     }
     else
     {
-        std::cout << "filePath: " << filePath << "uri: " << uri << std::endl;
         filePath += uri;
         std::cout << "+uri: " << filePath << std::endl;
     }
@@ -1412,253 +1418,146 @@ location Server::findRouteConfig(std::string& uri,  informations& serverConfig)
     throw std::runtime_error("Route not found for URI: " + uri);
 }
 
-void Server::handleRequestGET(int clientSocket, HTTPRequest& request, informations& serverConfig)
+
+void Server::handleRequestGET(int clientSocket,  HTTPRequest& request,  informations& serverConfig)
 {
-
+    // Determine the correct route based on the request URI
+    printf("dokali\n");
     location routeConfig = findRouteConfig(request.uri, serverConfig);
-
+    printf("dokali1\n");
     // Determine the file path based on the route configuration
     std::string filePath2 = mapUriToFilePath(request.uri, routeConfig);
 
-    // Check if the path is a directory
+    std::cout << "filepath: " << filePath2 << std::endl;
     std::string filePath = "." + filePath2;
-    if (isDirectory(filePath))
+    if (!fileExists(filePath))
     {
-        std::map<std::string, std::string>::iterator autoindexIt = routeConfig.autoindex.find("autoindex");
-        if (autoindexIt != routeConfig.autoindex.end() && autoindexIt->second == "on") {
-            // Generate directory listing
-            std::string directoryContent = generateDirectoryListing(filePath);
-            // Send directory listing as response
-            std::string response = "HTTP/1.1 200 OK\r\n";
-            response += "Content-Type: text/html\r\n";
-            response += "Content-Length: " + to_string(directoryContent.size()) + "\r\n";
-            response += "\r\n";
-            response += directoryContent;
-            send(clientSocket, response.c_str(), response.size(), 0);
-        }
-        else
-            sendErrorResponse(clientSocket, 403, "Forbidden");
-    }
-    else
-    {
-        // Existing file handling code
-        if (!fileExists(filePath))
-        {
-            sendErrorResponse(clientSocket, 404, "Not Found");
-            return;
-        }
-        std::string fileContent = readFileContent(filePath);
-        std::string response = "HTTP/1.1 200 OK\r\n";
-        response += "Content-Type: " + getMimeType(filePath) + "\r\n";
-        response += "Content-Length: " + to_string(fileContent.size()) + "\r\n";
-        response += "\r\n";
-        response += fileContent;
-        send(clientSocket, response.c_str(), response.size(), 0);
-    }
-}
-
-
-bool Server::isDirectory(const std::string& path)
-{
-    struct stat statbuf;
-    if (stat(path.c_str(), &statbuf) != 0)
-        return false;
-    return S_ISDIR(statbuf.st_mode);
-}
-
-#include <dirent.h>
-#include <sstream>
-
-std::string Server::generateDirectoryListing(const std::string& path) {
-    DIR *dir;
-    struct dirent *ent;
-    std::ostringstream html;
-
-    html << "<html><head><title>Index of " << path << "</title></head><body>";
-    html << "<h1>Index of " << path << "</h1><hr><pre>";
-
-    dir = opendir(path.c_str());
-    if (dir != NULL) {
-        while ((ent = readdir(dir)) != NULL) {
-            html << "<a href='" << ent->d_name << "'>" << ent->d_name << "</a><br>";
-        }
-        closedir(dir);
-    } else {
-        // Could not open directory
-        html << "Cannot access directory.";
-    }
-
-    html << "</pre><hr></body></html>";
-    return html.str();
-}
-void Server::handleRequestDELETE(int clientSocket, HTTPRequest& request, informations& serverConfig)
-{
-    // Determine the route based on the request URI
-    location routeConfig = findRouteConfig(request.uri, serverConfig);
-
-    // Map the URI to the corresponding file path
-    std::string filePath = mapUriToFilePath(request.uri, routeConfig);
-
-    // Check if the DELETE method is allowed for this route
-    if (routeConfig.allowed_methodes["allowed_methodes"].find("DELETE") == std::string::npos) {
-        sendErrorResponse(clientSocket, 405, "Method Not Allowed");
-        return;
-    }
-
-    struct stat path_stat;
-    stat(filePath.c_str(), &path_stat);
-
-    // Check if the file/directory exists
-    if (access(filePath.c_str(), F_OK) == -1) {
         sendErrorResponse(clientSocket, 404, "Not Found");
-        return;
+        return ;
     }
+    std::cout << "start read file: \n";
+    std::cout << "after add . :" << filePath << std::endl;
+    std::string fileContent = readFileContent(filePath);
 
-    // Check for necessary permissions
-    if (access(filePath.c_str(), W_OK) == -1) {
-        sendErrorResponse(clientSocket, 403, "Forbidden");
-        return;
-    }
+    std::cout << "+++++++++++++++++++++++++: "<< std::endl;
 
-    // Check if it's a directory and handle accordingly
-    if (S_ISDIR(path_stat.st_mode)) {
-        // Handle directory deletion here
-        // sendErrorResponse(clientSocket, 403, "Forbidden: Cannot delete directory");
-        return;
-    }
-
-    // Attempt to delete the file
-    if (remove(filePath.c_str()) != 0) {
-        sendErrorResponse(clientSocket, 500, "Internal Server Error");
-        return;
-    }
-
-    // Log the successful deletion
-    // log("File deleted: " + filePath);
-
-    // Send a success response
-    std::string response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
+    std::string response = "HTTP/1.1 200 OK\r\n";
+    response += "Content-Type: " + getMimeType(filePath) + "\r\n";
+    response += "Content-Length: " + to_string(fileContent.size()) + "\r\n";
+    response += "\r\n";
+    response += fileContent;
     send(clientSocket, response.c_str(), response.size(), 0);
 }
 
 
-void Server::handleConnections()
+void Server::acceptNewConnection()
 {
+    struct sockaddr_in clientAddr;
+    socklen_t clientAddrLen = sizeof(clientAddr);
+    int new_socket = accept(sockfd, (struct sockaddr *)&clientAddr, &clientAddrLen);
+    if (new_socket < 0) {
+        std::cerr << "Accept failed: " << strerror(errno) << std::endl;
+        return;
+    }
+    fcntl(new_socket, F_SETFL, O_NONBLOCK);
+    for (int i = 0; i < MAX_CLIENTS; i++) {
+        if (client_socket[i] == 0) {
+            client_socket[i] = new_socket;
+            requests[new_socket] = HTTPRequest();
+            break;
+        }
+    }
+}
+
+void Server::handleExistingConnections(fd_set& read_fds)
+{
+    for (int i = 0; i < MAX_CLIENTS; i++)
+    {
+        int sd = client_socket[i];
+        if (sd < 0)
+            continue;
+        if (FD_ISSET(sd, &read_fds)) {
+            char buffer[1024] = {0};
+            int valread = read(sd, buffer, sizeof(buffer));
+            if (valread > 0) {
+                requests[sd].appendData(buffer, valread);
+                if (requests[sd].isComplete()) {
+                    // Process request
+                    processRequest(sd, requests[sd]);
+                }
+            } else if (valread == 0 || (valread < 0 && errno != EAGAIN && errno != EWOULDBLOCK)) {
+                close(sd);
+                client_socket[i] = -1;
+                requests.erase(sd);
+            }
+        }
+    }
+}
+
+void Server::initializeFileDescriptorSet(fd_set& read_fds, int& max_sd)
+{
+    FD_ZERO(&read_fds);
+    FD_SET(sockfd, &read_fds);
+    max_sd = sockfd;
+
+    for (int i = 0; i < MAX_CLIENTS; i++)
+    {
+        int sd = client_socket[i];
+            if (sd > 0)
+            {
+                FD_SET(sd, &read_fds);
+                if (sd > max_sd)
+                    max_sd = sd;
+            }
+    }
+}
+
+void Server::handleConnections() {
     fd_set read_fds;
     struct timeval tv;
     int max_sd;
 
     while(true)
     {
-        FD_ZERO(&read_fds);
-        if (sockfd > FD_SETSIZE)
-            exitWithError("fuckyou..");
-        FD_SET(sockfd, &read_fds);
-        max_sd = sockfd;
-
-        for (int i = 0; i < MAX_CLIENTS; i++)
-        {
-            int sd = client_socket[i];
-            if (sd > 0)
-            {
-                if (sd > FD_SETSIZE)
-                    exitWithError("fuckyou");
-                FD_SET(sd, &read_fds);
-            }
-            if (sd > max_sd)
-                max_sd = sd;
-        }
+        initializeFileDescriptorSet(read_fds, max_sd);
 
         tv.tv_sec = 5;
         tv.tv_usec = 0;
 
         int activity = select(max_sd + 1, &read_fds, NULL, NULL, &tv);
         if ((activity < 0) && (errno != EINTR))
-            exitWithError("Select error");
+        {
+            std::cerr << "Select error: " << strerror(errno) << std::endl;
+            continue;
+        }
 
         if (FD_ISSET(sockfd, &read_fds))
-        {
-            struct sockaddr_in clientAddr;
-            socklen_t clientAddrLen = sizeof(clientAddr);
-            int new_socket = accept(sockfd, (struct sockaddr *)&clientAddr, &clientAddrLen);
-            std::cout << "new_client: " << new_socket << std::endl;
-            if (new_socket < 0)
-                exitWithError("Accept failed");
-            // fcntl(new_socket, F_SETFL, O_NONBLOCK);
-            std::cout << "new_client: " << new_socket << std::endl;
-            for (int i = 0; i < MAX_CLIENTS; i++)
-            {
-                if (client_socket[i] == 0)
-                {
-                    std::cout << "new_client: " << new_socket << std::endl;
-                    client_socket[i] = new_socket;
-                    requests[new_socket] = HTTPRequest();
-                    break ;
-                }
-            }
-            std::cout << "new_client: " << new_socket << std::endl;
-        }
+            acceptNewConnection();
 
-        for (int i = 0; i < MAX_CLIENTS; i++)
-        {
-            int sd = client_socket[i];
-            if (sd > 0)
-                std::cout << "ana kbar mn 0: " << sd << std::endl;
-            if (FD_ISSET(sd, &read_fds))
-            {
-                std::cout << "ana 9dart ndkhol" << std::endl;
-                char buffer[1024] = {0};
-                std::cout << "befor read" << std::endl;
-                int valread = read(sd, buffer, sizeof(buffer));
-                std::cout << "after read" << std::endl;
-                if (valread > 0)
-                {
-                    std::cout << "befor appened" << std::endl;
-                    requests[sd].appendData(buffer, valread);
-                    std::cout << "rawrequest: " << requests[sd].rawRequest << std::endl;
-                    std::cout << "after appened" << std::endl;
-                    if (requests[sd].isComplete())
-                    {
-                        try
-                        {
-                            std::cout << "hello\n"<< std::endl;
-                            requests[sd].parse(requests[sd].rawRequest);
-                            std::cout << "++++++++++URI: " << requests[sd].uri << std::endl;
-                            std::cout << "request: " << requests[sd].getFullRequest() << std::endl;
-
-                            if (requests[sd].method == "GET")
-                                handleRequestGET(sd ,requests[sd], serverConfig);
-                            else if (requests[sd].method == "POST")
-                                handleRequestPOST(sd ,requests[sd]);
-                            else if (requests[sd].method == "DELETE")
-                                    handleRequestDELETE(sd, requests[sd], serverConfig);
-                            else
-                                sendErrorResponse(sd, 501, "Not Implemented");
-                
-                            std::string response = "HTTP/1.1 200 OK\r\n";
-                            response += "Content-Type: \r\n";
-                            response += "Content-Length: 10\r\n";
-                            response += "\r\nhhhhhhhhhhhhhhn";
-                            send(sd, response.c_str(), response.size(), 0);
-                            requests[sd].clear(); // Clear the request for future use
-                        }
-                        catch (std::runtime_error& e)
-                        {
-                            std::cout << e.what() << std::endl;
-                        }
-                    }
-                }
-                else if (valread == 0 || (valread < 0 && errno != EAGAIN && errno != EWOULDBLOCK))
-                {
-                    close(sd);
-                    client_socket[i] = 0;
-                    requests.erase(sd); // Remove the request from map
-                }
-            }
-        }
+        handleExistingConnections(read_fds);
     }
 }
 
+void Server::processRequest(int clientSocket, HTTPRequest& request)
+{
+    try
+    {
+        if (request.method == "GET")
+            handleRequestGET(clientSocket, request, serverConfig);
+        else if (request.method == "POST")
+            handleRequestPOST(clientSocket, request);
+        else
+        {
+            // Add more request methods handling if needed
+            sendErrorResponse(clientSocket, 501, "Not Implemented");
+        }
+    }
+    catch (const std::exception& e)
+    {
+        std::cerr << "Error processing request: " << e.what() << std::endl;
+        sendErrorResponse(clientSocket, 500, "Internal Server Error");
+    }
+}
 
 
 int main(int ac, char **av)

@@ -376,15 +376,22 @@ void Server::handleConnections()
     struct timeval tv;
     int max_sd;
 
-    while(true) {
+    while(true)
+    {
         FD_ZERO(&read_fds);
         FD_SET(sockfd, &read_fds);
         max_sd = sockfd;
 
-        for (int i = 0; i < MAX_CLIENTS; i++) {
+        for (int i = 0; i < MAX_CLIENTS; i++)
+        {
             int sd = client_socket[i];
-            if (sd > 0) FD_SET(sd, &read_fds);
-            if (sd > max_sd) max_sd = sd;
+            if (sd > 0)
+            {
+                printf("hello: %d\n", sd);
+                FD_SET(sd, &read_fds);
+            }
+            if (sd > max_sd)
+                max_sd = sd;
         }
 
         tv.tv_sec = 5;

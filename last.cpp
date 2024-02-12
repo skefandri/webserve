@@ -851,6 +851,7 @@ int servers::fillInfos(void)
 #include <fstream>
 #include <sys/time.h>
 #include <fcntl.h>
+#include <iosfwd>
 
 #define MAX_CLIENTS 30
 
@@ -870,7 +871,7 @@ class HTTPRequest
         void parse();
         void clear();
         bool isComplete();
-        void appendData(const char* buffer, int length);
+        bool appendData(const char* buffer, int length);
         HTTPRequest();
 
     std::string getFullRequest() const;
@@ -884,7 +885,7 @@ class Server
         int client_socket[MAX_CLIENTS];
         std::map<int, HTTPRequest> requests;
         informations serverConfig;
-        std::map<int, std::fstream> clientTempFiles;
+        std::map<int, std::fstream*> clientTempFiles;
     public:
         Server();
         Server(informations config);
@@ -962,7 +963,7 @@ bool readLine(std::istringstream& requestStream, std::string& line)
     return requestStream.good();
 }
 
-HTTPRequest::HTTPRequest() : method(""), uri(""), httpVersion(""), body(""), rawRequest("") {}
+HTTPRequest::HTTPRequest() :  totalDataSize(0), method(""), uri(""), httpVersion(""), body(""), rawRequest("") {}
 
 void HTTPRequest::parse()
 {
@@ -1001,85 +1002,46 @@ void HTTPRequest::parse()
     }
 
     // Parse headers
-    while (std::getline(*tempFileStreamRead, line) && !line.empty())
+while (std::getline(*tempFileStreamRead, line))
     {
+        if (line == "\r") // Check for the empty line indicating end of headers
+            break;
+
         if (line.back() == '\r')
             line.pop_back(); // Remove carriage return
 
         std::istringstream headerLineStream(line);
         std::string key, value;
-        if (std::getline(headerLineStream, key, ':') && std::getline(headerLineStream, value))
+        if (std::getline(headerLineStream, key, ':'))
         {
-            value.erase(0, value.find_first_not_of(" ")); // Trim leading whitespace
-            std::transform(key.begin(), key.end(), key.begin(), ::tolower); // Convert key to lowercase
-            headers[key].push_back(value);
+            if (std::getline(headerLineStream, value))
+            {
+                // Remove any leading whitespace from value
+                size_t start = value.find_first_not_of(" ");
+                if (start != std::string::npos)
+                    value = value.substr(start);
+
+                // Convert key to lowercase for case-insensitivity
+                std::transform(key.begin(), key.end(), key.begin(), ::tolower);
+
+                headers[key].push_back(value);
+            }
+            else
+            {
+                std::cerr << "Warning: Header without value: " << key << std::endl;
+            }
         }
         else
+        {
+            std::cerr << "Malformed header line: " << line << std::endl;
             throw std::runtime_error("Malformed header line");
+        }
     }
+
 
     // Read the body
     body.assign((std::istreambuf_iterator<char>(*tempFileStreamRead)), std::istreambuf_iterator<char>());
 }
-
-// void HTTPRequest::parse()
-// {
-//     if (!tempFileStreamRead || !tempFileStreamRead->is_open())
-//         throw std::runtime_error("Temporary file stream is not available or not open.");
-
-//     // Reset file stream to the beginning
-//     tempFileStreamRead->clear();
-//     tempFileStreamRead->seekg(0, std::ios::beg);
-
-//     std::string line;
-//     // Parse the request line
-//     if (!std::getline(*tempFileStreamRead, line) || line.empty())
-//         throw std::runtime_error("Empty request line");
-
-//     // Remove trailing carriage return if present
-//     if (line.back() == '\r')
-//         line.pop_back();
-
-//     std::istringstream requestLineStream(line);
-//     if (!(requestLineStream >> method >> uri >> httpVersion))
-//         throw std::runtime_error("Malformed request line");
-    
-//     size_t queryPos = uri.find('?');
-//     if (queryPos != std::string::npos)
-//     {
-//         std::string queryString = uri.substr(queryPos + 1);
-//         uri = uri.substr(0, queryPos);
-//         std::istringstream queryStream(queryString);
-//         std::string param;
-//         while (std::getline(queryStream, param, '&'))
-//         {
-//             size_t equalPos = param.find('=');
-//             if (equalPos != std::string::npos)
-//                 queryParams[param.substr(0, equalPos)] = param.substr(equalPos + 1);
-//         }
-//     }
-//     // Parse headers
-//     while (std::getline(*tempFileStreamRead, line) && !line.empty())
-//     {
-//         if (line.back() == '\r')
-//             line.pop_back(); // Remove carriage return
-
-//         std::istringstream headerLineStream(line);
-//         std::string key, value;
-//         if (std::getline(headerLineStream, key, ':') && std::getline(headerLineStream, value))
-//         {
-//             value.erase(0, value.find_first_not_of(" ")); // Trim leading whitespace
-//             std::transform(key.begin(), key.end(), key.begin(), ::tolower); // Convert key to lowercase
-//             headers[key].push_back(value);
-//         }
-//         else
-//             throw std::runtime_error("Malformed header line");
-//     }
-
-//     // Read the body
-//     body.assign((std::istreambuf_iterator<char>(*tempFileStreamRead)), std::istreambuf_iterator<char>());
-// }
-
 
 
 std::string Server::readFileContent(const std::string& filePath)
@@ -1096,22 +1058,28 @@ std::string Server::readFileContent(const std::string& filePath)
     file.close();
     return content;
 }
-void HTTPRequest::appendData(const char* buffer, int length)
+bool HTTPRequest::appendData(const char* buffer, int length)
 {
     if (tempFileStreamWrite && tempFileStreamWrite->is_open())
     {
         tempFileStreamWrite->write(buffer, length);
+        tempFileStreamWrite->flush();  // Ensure data is flushed to the file
         totalDataSize += length;
+        rawRequest.append(buffer, length); // Append data to rawRequest
 
         // Implement maximum size limit check
-        const size_t MAX_SIZE_LIMIT = 10000000; // Example limit, adjust as needed
+        size_t MAX_SIZE_LIMIT = 10000000; // Example limit, adjust as needed
         if (totalDataSize > MAX_SIZE_LIMIT)
         {
-            exitWithError("max failed");
-            // Handle exceeding size limit (e.g., close connection, report error)
+            // Exceeding size limit
+            return false;
         }
+        return true;
     }
+    return false;
 }
+
+
 
 
 bool HTTPRequest::isComplete()
@@ -1308,139 +1276,81 @@ JsonData parseJson(const std::string& json)
 
     return data;
 }
-
-void Server::openTempFileForClient(int socketDescriptor)
-{
-    // Generate a unique filename for the temporary file
+void Server::openTempFileForClient(int socketDescriptor){
     std::string tempFileName = "client_temp_" + std::to_string(socketDescriptor) + ".tmp";
-
-    // Open a new file stream and add it to the map
-    std::fstream tempFile;
-    tempFile.open(tempFileName, std::ios::in | std::ios::out | std::ios::trunc);
-    if (!tempFile.is_open())
-    {
+    // For Writing
+    std::ofstream* tempFileWrite = new std::ofstream(tempFileName, std::ios::binary | std::ios::out);
+    // For Reading
+    std::ifstream* tempFileRead = new std::ifstream(tempFileName, std::ios::binary | std::ios::in);
+    
+    if (!tempFileWrite->is_open() || !tempFileRead->is_open()) {
         throw std::runtime_error("Failed to open temporary file for client");
     }
-    clientTempFiles[socketDescriptor] = std::move(tempFile);
+
+    requests[socketDescriptor].tempFileStreamWrite = tempFileWrite;
+    requests[socketDescriptor].tempFileStreamRead = tempFileRead;
 }
+
+// void Server::openTempFileForClient(int socketDescriptor)
+// {
+//     std::string tempFileName = "client_temp_" + std::to_string(socketDescriptor) + ".tmp";
+//     std::fstream* tempFile = new std::fstream(tempFileName, std::ios::in | std::ios::out | std::ios::trunc);
+//     if (!tempFile->is_open())
+//     {
+//         throw std::runtime_error("Failed to open temporary file for client");
+//     }
+//     clientTempFiles[socketDescriptor] = tempFile;
+// }
+
+
+
+
 void Server::handleRequestPOST(int clientSocket, HTTPRequest& request)
 {
-    // Check Content-Type header
+    if (!request.tempFileStreamRead || !request.tempFileStreamRead->is_open()) {
+        sendErrorResponse(clientSocket, 500, "Internal Server Error: Temporary file not open");
+        return;
+    }
+
+    request.tempFileStreamRead->clear();
+    request.tempFileStreamRead->seekg(0, std::ios::beg);
+
+    std::string requestBody;
+    std::string line;
+    while (std::getline(*request.tempFileStreamRead, line))
+        requestBody += line + "\n";
+
     std::string contentType;
-    if (!request.headers["content-type"].empty()) {
+    if (!request.headers["content-type"].empty())
         contentType = request.headers["content-type"].front();
-    }
 
-    if (contentType.find("application/x-www-form-urlencoded") != std::string::npos)
-    {
-        // Read data from the temporary file
-        std::string body;
-        if (request.tempFileStreamRead && request.tempFileStreamRead->is_open()) {
-            std::stringstream ss;
-            ss << request.tempFileStreamRead->rdbuf();
-            body = ss.str();
-        }
-
-        // Parse URL-encoded data
-        std::map<std::string, std::string> formData = parseUrlEncoded(body);
-        // Process form data as needed
+    if (contentType.find("application/x-www-form-urlencoded") != std::string::npos) {
+        std::map<std::string, std::string> formData = parseUrlEncoded(requestBody);
+        // Handle URL-encoded data
     }
-    else if (contentType.find("multipart/form-data") != std::string::npos)
-    {
-        // Extract boundary
+    else if (contentType.find("multipart/form-data") != std::string::npos) {
         size_t boundaryPos = contentType.find("boundary=");
-        if (boundaryPos == std::string::npos)
-        {
+        if (boundaryPos == std::string::npos) {
             sendErrorResponse(clientSocket, 400, "Bad Request: No boundary in multipart/form-data");
             return;
         }
-        std::string boundary = contentType.substr(boundaryPos + 9); // 9 is the length of "boundary="
-
-        // Read data from the temporary file
-        std::string body;
-        if (request.tempFileStreamRead && request.tempFileStreamRead->is_open()) {
-            std::stringstream ss;
-            ss << request.tempFileStreamRead->rdbuf();
-            body = ss.str();
-        }
-
+        std::string boundary = contentType.substr(boundaryPos + 9);
+        MultipartFormData multipartData = parseMultipartFormData(requestBody, boundary);
         // Handle multipart form data
-        MultipartFormData multipartData = parseMultipartFormData(body, boundary);
-        // Process multipart data as needed
     }
-    else if (contentType.find("application/json") != std::string::npos)
-    {
-        // Read data from the temporary file
-        std::string body;
-        if (request.tempFileStreamRead && request.tempFileStreamRead->is_open()) {
-            std::stringstream ss;
-            ss << request.tempFileStreamRead->rdbuf();
-            body = ss.str();
-        }
-
-        // Parse JSON data
-        JsonData jsonData = parseJson(body);
-        // Process JSON data as needed
+    else if (contentType.find("application/json") != std::string::npos) {
+        JsonData jsonData = parseJson(requestBody);
+        // Handle JSON data
     }
-    else
-    {
-        // Unsupported Content-Type
+    else {
         sendErrorResponse(clientSocket, 415, "Unsupported Media Type");
         return;
     }
 
-    // Send a response to the client
     std::string response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
     send(clientSocket, response.c_str(), response.size(), 0);
 }
 
-// void Server::handleRequestPOST(int clientSocket, HTTPRequest& request)
-// {
-//     // Check Content-Type header
-//     std::string contentType = request.headers["content-type"].front();
-
-//     if (contentType.find("application/x-www-form-urlencoded") != std::string::npos)
-//     {
-//         std::ifstream tempFileStream = request.tempFileStream;
-//         std::stringstream ss;
-//         ss << tempFileStream.rdbuf();  // Read the entire content of the temporary file
-//         std::string body = ss.str();
-//         std::map<std::string, std::string> formData = parseUrlEncoded(request.body);
-//     }
-//     else if (contentType.find("multipart/form-data") != std::string::npos)
-//     {
-//         // Extract boundary
-//         size_t boundaryPos = contentType.find("boundary=");
-//         if (boundaryPos == std::string::npos)
-//         {
-//             sendErrorResponse(clientSocket, 400, "Bad Request: No boundary in multipart/form-data");
-//             return;
-//         }
-//         std::string boundary = contentType.substr(boundaryPos + 9); // 9 is the length of "boundary="
-
-//         // Handle file uploads and multipart data
-//         MultipartFormData multipartData = parseMultipartFormData(request.body, boundary);
-//         // Handle multipart data
-//     }
-//     else if (contentType.find("application/json") != std::string::npos)
-//     {
-//         // Parse JSON data
-//         JsonData jsonData = parseJson(request.body);
-//         // Handle JSON data
-//     }
-//     else
-//     {
-//         // Unsupported Content-Type
-//         sendErrorResponse(clientSocket, 415, "Unsupported Media Type");
-//         return;
-//     }
-
-//     // Process the data as needed
-
-//     // Send a response to the client
-//     std::string response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
-//     send(clientSocket, response.c_str(), response.size(), 0);
-// }
 
 
 bool Server::fileExists(std::string& filePath)
@@ -1545,46 +1455,57 @@ location Server::findRouteConfig(std::string& uri,  informations& serverConfig)
     throw std::runtime_error("Route not found for URI: " + uri);
 }
 
+void Server::handleRequestGET(int clientSocket, HTTPRequest& request, informations& serverConfig)
+{
+    // Determine the correct route based on the request URI
+    location routeConfig;
+    try
+    {
+        routeConfig = findRouteConfig(request.uri, serverConfig);
+    }
+    catch (const std::runtime_error& e)
+    {
+        sendErrorResponse(clientSocket, 404, "Not Found");
+        return;
+    }
 
-// void Server::handleRequestGET(int clientSocket,  HTTPRequest& request,  informations& serverConfig)
-// {
-//     // Determine the correct route based on the request URI
-//     printf("dokali\n");
-//     location routeConfig = findRouteConfig(request.uri, serverConfig);
-//     printf("dokali1\n");
-//     // Determine the file path based on the route configuration
-//     std::string filePath2 = mapUriToFilePath(request.uri, routeConfig);
+    // Determine the file path based on the route configuration
+    std::string filePath2 = mapUriToFilePath(request.uri, routeConfig);
 
-//     std::string filePath = "." + filePath2;
-//     if (!fileExists(filePath))
-//     {
-//         sendErrorResponse(clientSocket, 404, "Not Found");
-//         return ;
-//     }
-//     std::ifstream fileStream(filePath, std::ios::binary | std::ios::ate); // Open file for reading at the end
-//     if (!fileStream)
-//     {
-//         sendErrorResponse(clientSocket, 500, "Internal Server Error");
-//         return;
-//     }
-//     std::streamsize size = fileStream.tellg();
-//     fileStream.seekg(0, std::ios::beg); // Go back to the start of the file
+    // Check if the file exists
+    std::string filePath = "." + filePath2;
+    if (!fileExists(filePath))
+    {
+        sendErrorResponse(clientSocket, 404, "Not Found");
+        return;
+    }
 
-//     std::vector<char> buffer(size);
-//     if (fileStream.read(buffer.data(), size))
-//     {
-//         std::string response = "HTTP/1.1 200 OK\r\n";
-//         response += "Content-Type: " + getMimeType(filePath) + "\r\n";
-//         response += "Content-Length: " + std::to_string(size) + "\r\n";
-//         response += "\r\n";
-//         response += std::string(buffer.begin(), buffer.end());
+    // Open the file for reading
+    std::ifstream fileStream(filePath, std::ios::binary | std::ios::ate);
+    if (!fileStream)
+    {
+        sendErrorResponse(clientSocket, 500, "Internal Server Error");
+        return;
+    }
 
-//         send(clientSocket, response.c_str(), response.length(), 0);
-//     }
-//     else
-//         sendErrorResponse(clientSocket, 500, "Internal Server Error");
-// }
+    // Read the file content
+    std::streamsize size = fileStream.tellg();
+    fileStream.seekg(0, std::ios::beg);
+    std::vector<char> buffer(size);
+    if (!fileStream.read(buffer.data(), size))
+    {
+        sendErrorResponse(clientSocket, 500, "Internal Server Error");
+        return;
+    }
 
+    // Prepare and send the response
+    std::string response = "HTTP/1.1 200 OK\r\n";
+    response += "Content-Type: " + getMimeType(filePath) + "\r\n";
+    response += "Content-Length: " + std::to_string(size) + "\r\n";
+    response += "\r\n";
+    response += std::string(buffer.begin(), buffer.end());
+    send(clientSocket, response.c_str(), response.length(), 0);
+}
 
 void Server::handleConnections()
 {
@@ -1642,7 +1563,6 @@ void Server::handleConnections()
                     newRequest.tempFileStreamWrite = new std::ofstream(tempFileName, std::ios::binary | std::ios::out);
                     newRequest.tempFileStreamRead = new std::ifstream(tempFileName, std::ios::binary | std::ios::in);
                     requests[new_socket] = std::move(newRequest);
-
                     break;
                 }
             }
@@ -1657,18 +1577,22 @@ void Server::handleConnections()
                 int valread = read(sd, buffer, sizeof(buffer));
                 if (valread > 0)
                 {
-                    requests[sd].appendData(buffer, valread);
+                    bool success = requests[sd].appendData(buffer, valread);
+                    if (!success)
+                    {
+                        // Handle size limit exceeded
+                        sendErrorResponse(sd, 413, "Payload Too Large");
+                        continue;
+                    }
                     if (requests[sd].isComplete())
                     {
+                        printf("hello\n");
                         requests[sd].parse();
+                        printf("hello1\n");
                         if (requests[sd].method == "GET")
-                        {
                             handleRequestGET(sd, requests[sd], serverConfig);
-                        }
                         else if (requests[sd].method == "POST")
-                        {
                             handleRequestPOST(sd, requests[sd]);
-                        }
 
                         // Close and delete temporary file
                         if (requests[sd].tempFileStreamWrite && requests[sd].tempFileStreamWrite->is_open())
@@ -1714,111 +1638,6 @@ void Server::handleConnections()
         }
     }
 }
-
-// void Server::handleConnections()
-// {
-//     fd_set read_fds;
-//     struct timeval tv;
-//     int max_sd;
-
-//     while(true)
-//     {
-//         FD_ZERO(&read_fds);
-//         FD_SET(sockfd, &read_fds);
-//         max_sd = sockfd;
-
-//         for (int i = 0; i < MAX_CLIENTS; i++)
-//         {
-//             int sd = client_socket[i];
-//             if (sd > 0)
-//                 FD_SET(sd, &read_fds);
-//             if (sd > max_sd)
-//                 max_sd = sd;
-//         }
-
-//         tv.tv_sec = 5;
-//         tv.tv_usec = 0;
-
-//         int activity = select(max_sd + 1, &read_fds, NULL, NULL, &tv);
-//         if ((activity < 0) && (errno != EINTR))
-//             exitWithError("Select error");
-
-//         if (FD_ISSET(sockfd, &read_fds))
-//         {
-//             struct sockaddr_in clientAddr;
-//             socklen_t clientAddrLen = sizeof(clientAddr);
-//             int new_socket = accept(sockfd, (struct sockaddr *)&clientAddr, &clientAddrLen);
-//             if (new_socket < 0) {
-//                 exitWithError("Accept failed");
-//             } else {
-//                 fcntl(new_socket, F_SETFL, O_NONBLOCK);
-
-//                 // When a new client connects
-//                 std::string tempFileName = "client_temp_" + std::to_string(new_socket) + ".tmp";
-//                 std::ofstream* tempFileWrite = new std::ofstream(tempFileName, std::ios::binary | std::ios::out);
-//                 std::ifstream* tempFileRead = new std::ifstream(tempFileName, std::ios::binary | std::ios::in);
-
-//                 HTTPRequest newRequest;
-//                 newRequest.tempFileStreamWrite = tempFileWrite;
-//                 newRequest.tempFileStreamRead = tempFileRead;
-//                 requests[new_socket] = std::move(newRequest);
-
-//                 client_socket[i] = new_socket;
-//             }
-//         }
-
-//         for (int i = 0; i < MAX_CLIENTS; i++)
-//         {
-//             int sd = client_socket[i];
-//             if (FD_ISSET(sd, &read_fds))
-//             {
-//                 char buffer[1024];
-//                 int valread = read(sd, buffer, sizeof(buffer));
-//                 if (valread > 0)
-//                 {
-//                     // Stream data directly to the temporary file
-//                     if (clientTempFiles.find(sd) != clientTempFiles.end())
-//                         clientTempFiles[sd].write(buffer, valread);
-                    
-//                     // If the request is complete, parse it and handle accordingly
-//                     if (requests[sd].isComplete())
-//                     {
-//                         requests[sd].parse();  // Parse the request from the temporary file
-                        
-//                         if (requests[sd].method == "GET")
-//                             handleRequestGET(sd, requests[sd], serverConfig);
-//                         else if (requests[sd].method == "POST")
-//                             handleRequestPOST(sd, requests[sd]);
-
-//                         requests[sd].clear(); // Clear the request for future use
-//                     }
-//                 }
-//                 else if (valread == 0 || (valread < 0 && errno != EAGAIN && errno != EWOULDBLOCK))
-//                 {
-//                     // Client disconnected or error occurred
-//                     if (clientTempFiles.find(sd) != clientTempFiles.end())
-//                     {
-//                         std::string tempFileName = "client_temp_" + std::to_string(sd) + ".tmp";
-//                         clientTempFiles[sd].close();
-//                         remove(tempFileName.c_str());
-//                         clientTempFiles.erase(sd);
-
-//                         // Also close the ifstream
-//                         if (requests[sd].tempFileStream->is_open())
-//                         {
-//                             requests[sd].tempFileStream->close();
-//                             delete requests[sd].tempFileStream;
-//                         }
-//                     }
-//                     close(sd);
-//                     client_socket[i] = 0;
-//                     requests.erase(sd);
-//                 }
-//             }
-//         }
-//     }
-// }
-
 
 
 int main(int ac, char **av)
