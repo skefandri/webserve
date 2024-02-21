@@ -92,3 +92,12 @@ application/json: Commonly used for APIs; sends JSON formatted data.
 Statelessness: HTTP, including POST requests, is stateless. Each request-response cycle is independent.
 Security: POST data is not visible in the URL (unlike GET requests), but it's not inherently secure. Sensitive data should always be encrypted (e.g., using HTTPS).
 Idempotency: POST requests are not idempotent, meaning multiple identical POST requests could have different effects, unlike GET requests which are idempotent.
+
+
+
+
+
+
+
+
+

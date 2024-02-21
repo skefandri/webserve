@@ -1468,6 +1468,7 @@ bool Server::isDirectory(const std::string& path)
 
 #include <dirent.h>
 #include <sstream>
+#include <csignal>
 
 std::string Server::generateDirectoryListing(const std::string& path) {
     DIR *dir;
@@ -1491,6 +1492,7 @@ std::string Server::generateDirectoryListing(const std::string& path) {
     html << "</pre><hr></body></html>";
     return html.str();
 }
+
 void Server::handleRequestDELETE(int clientSocket, HTTPRequest& request, informations& serverConfig)
 {
     // Determine the route based on the request URI
@@ -1541,9 +1543,24 @@ void Server::handleRequestDELETE(int clientSocket, HTTPRequest& request, informa
     send(clientSocket, response.c_str(), response.size(), 0);
 }
 
+void setNonBlocking(int sock)
+{
+	int flags = fcntl(sock, F_GETFL, 0);
+	if (flags == -1)
+	{
+		perror("fcntl F_GETFL");
+		exit(EXIT_FAILURE);
+	}
+	if (fcntl(sock, F_SETFL, flags | O_NONBLOCK) == -1)
+	{
+		perror("fcntl F_SETFL , O_NONBLCOK");
+		exit(EXIT_FAILURE);
+	}
+}
 
 void Server::handleConnections()
 {
+    signal(SIGPIPE, SIG_IGN);
     fd_set read_fds;
     struct timeval tv;
     int max_sd;
@@ -1571,7 +1588,7 @@ void Server::handleConnections()
 
         tv.tv_sec = 5;
         tv.tv_usec = 0;
-
+        
         int activity = select(max_sd + 1, &read_fds, NULL, NULL, &tv);
         if ((activity < 0) && (errno != EINTR))
             exitWithError("Select error");
@@ -1584,8 +1601,7 @@ void Server::handleConnections()
             std::cout << "new_client: " << new_socket << std::endl;
             if (new_socket < 0)
                 exitWithError("Accept failed");
-            // fcntl(new_socket, F_SETFL, O_NONBLOCK);
-            std::cout << "new_client: " << new_socket << std::endl;
+            setNonBlocking(new_socket);
             for (int i = 0; i < MAX_CLIENTS; i++)
             {
                 if (client_socket[i] == 0)

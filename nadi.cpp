@@ -872,19 +872,25 @@ class HTTPRequest
 class Server
 {
     private:
+        std::map<int, informations> info;
         int sockfd;
+        std::map<std::string, std::string>       port;
+        std::map<std::string, std::string>       host;
         int client_socket[MAX_CLIENTS];
         std::map<int, HTTPRequest> requests;
         informations serverConfig;
         int epoll_fd;
         static const int MAX_EVENTS = 10;
     public:
+        std::map<int, informations> &getInfo();
+        void setupEpoll();
         void run();
         Server();
-        Server(informations config);
-        int createSocket();
-        void bindSocket(int port, const std::string& ip);
-        void listenToSocket();
+        Server(std::map<std::string, std::string>& port,std::map<std::string, std::string> host);
+        bool createSocket();
+        bool bindSocket();
+        bool listenToSocket();
+        void handleConnections();
         std::string readFileContent(const std::string& filePath);
         void handleRequestGET( int clientSocket,  HTTPRequest& request,  informations& serverConfig);
         std::string getMimeType(std::string& filePath);
@@ -895,18 +901,31 @@ class Server
         location findRouteConfig(std::string& uri, informations& serverConfig);
         void sendErrorResponse(int clientSocket, int errorCode,const std::string& errorMessage);
         void setConfig(const informations& config);
+        void acceptNewConnection();
+        void handleExistingConnections(fd_set& read_fds);
+        void initializeFileDescriptorSet(fd_set& read_fds, int& max_sd);
+        void processRequest(int clientSocket, HTTPRequest& request);
         bool isDirectory(const std::string& path);
         std::string generateDirectoryListing(const std::string& path);
+        void initializeInfo(const std::map<int, informations>& allInfo);
 };
+
+std::map<int, informations> &Server::getInfo()
+{
+    return info;
+}
 
 Server::Server()
 {
     memset(client_socket, 0, sizeof(client_socket));
 }
 
-Server::Server(informations config) : serverConfig(config)
+Server::        Server(std::map<std::string, std::string>& port,std::map<std::string, std::string> host) : port(port), host(host)
 {
     memset(client_socket, 0, sizeof(client_socket));
+}
+void Server::initializeInfo(const std::map<int, informations>& allInfo) {
+    info = allInfo;
 }
 
 void Server::setConfig(const informations& config)
@@ -924,32 +943,82 @@ void exitWithError(const std::string& errorMessage)
     exit(1);
 }
 
-int Server::createSocket()
-{
-    sockfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+bool Server::createSocket() {
+    sockfd = socket(AF_INET, SOCK_STREAM, 0);
     if (sockfd < 0)
-        exitWithError("Failed to Create Socket");
-    return sockfd;
-}
+    {
+        perror("ERROR opening socket");
+        return false;
+    }
 
-void Server::bindSocket(int port, const std::string& ip)
-{
-    struct sockaddr_in serverAddr;
-    serverAddr.sin_family = AF_INET;
-    serverAddr.sin_port = htons(port);
-    serverAddr.sin_addr.s_addr = inet_addr(ip.c_str());
+    // Set socket to non-blocking mode
+    int flags = fcntl(sockfd, F_GETFL, 0);
+    if (flags < 0) {
+        perror("ERROR getting socket flags");
+        return false;
+    }
+    if (fcntl(sockfd, F_SETFL, flags | O_NONBLOCK) < 0) {
+        perror("ERROR setting socket to non-blocking");
+        return false;
+    }
     int opt = 1;
     setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt));
-
-    if (bind(sockfd, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) < 0)
-        exitWithError("Failed to bind Socket");
+    return true;
 }
 
-void Server::listenToSocket()
+bool Server::bindSocket() {
+    struct sockaddr_in serverAddr;
+    bzero((char *) &serverAddr, sizeof(serverAddr));
+
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_addr.s_addr = inet_addr(host["host"].c_str());
+    serverAddr.sin_port = htons(atoi(port["listen"].c_str()));
+
+    if (bind(sockfd, (struct sockaddr *) &serverAddr, sizeof(serverAddr)) < 0)
+    {
+        perror("ERROR on binding");
+        return false;
+    }
+
+    return true;
+}
+
+bool Server::listenToSocket()
 {
-    if (listen(sockfd, 24) < 0)
-        exitWithError("Failed to Listen To Socket");
+    if (listen(sockfd, SOMAXCONN) < 0)
+    {
+        perror("ERROR on listen");
+        return false;
+    }
+
+    return true;
 }
+
+// int Server::createSocket()
+// {
+//     sockfd = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+//     if (sockfd < 0)
+//         exitWithError("Failed to Create Socket");
+//     return sockfd;
+// }
+
+// void Server::bindSocket(int port, const std::string& ip)
+// {
+//     struct sockaddr_in serverAddr;
+//     serverAddr.sin_family = AF_INET;
+//     serverAddr.sin_port = htons(port);
+//     serverAddr.sin_addr.s_addr = inet_addr(ip.c_str());
+//     int opt = 1;
+//     setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt));
+//     if (bind(sockfd, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) < 0)
+//         exitWithError("Failed to bind Socket");
+// }
+
+// void Server::listenToSocket()
+// {
+//     if (listen(sockfd, 24) < 0)
+//         exitWithError("Failed to Listen To Socket");
+// }
 
 bool readLine(std::istringstream& requestStream, std::string& line)
 {
@@ -1407,22 +1476,23 @@ location Server::findRouteConfig(std::string& uri,  informations& serverConfig)
             // std::cout << "localpath: " << locPath << std::endl;
             if (uri.compare(0, locPath.length(), locPath) == 0)
             {
-                // std::cout << "second: " << loc.index.size() << std::endl;
+                std::cout << "second: wach asat " << loc.index.size() << std::endl;
                 return loc; // Found a matching location
             }
         }
     }
-    throw std::runtime_error("Route not found for URI: " + uri);
+    return serverConfig.locationsInfo[serverConfig.locationsInfo.size()- 1];
+    // throw std::runtime_error("Route not found for URI: " + uri);
 }
 
 void Server::handleRequestGET(int clientSocket, HTTPRequest& request, informations& serverConfig)
 {
 
     location routeConfig = findRouteConfig(request.uri, serverConfig);
-
+    std::cout << "fat find ROute COnfig\n";
     // Determine the file path based on the route configuration
     std::string filePath2 = mapUriToFilePath(request.uri, routeConfig);
-
+    printf("wsal bach yzid . flfile\n");
     // Check if the path is a directory
     std::string filePath = "." + filePath2;
     if (isDirectory(filePath))
@@ -1447,6 +1517,7 @@ void Server::handleRequestGET(int clientSocket, HTTPRequest& request, informatio
         // Existing file handling code
         if (!fileExists(filePath))
         {
+            std::cout << "fileapAth: " << filePath << std::endl;
             sendErrorResponse(clientSocket, 404, "Not Found");
             return;
         }
@@ -1558,12 +1629,12 @@ void setNonBlocking(int sock)
 	}
 }
 #include<csignal>
+#include<algorithm>
 
 void Server::run()
 {
     signal(SIGPIPE, SIG_IGN);
     struct epoll_event ev, events[MAX_EVENTS];
-
     epoll_fd = epoll_create(1);
     if (epoll_fd == -1)
     {
@@ -1571,31 +1642,43 @@ void Server::run()
         exit(EXIT_FAILURE);
     }
 
-    // Add listening socket to the interest list of epoll
-    ev.events = EPOLLIN;
-    ev.data.fd = sockfd;
-    if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, sockfd, &ev) == -1)
+// Add all listening sockets to the epoll instance
+    std::map<int, informations>::iterator it = info.begin();
+    std::cout << "it: " << it->first << std::endl;
+    for (; it != info.end(); ++it)
     {
-        perror("epoll_ctl: listen_sock");
-        exit(EXIT_FAILURE);
+        std::cout << "dkhal l for\n";
+        int listenSock = it->first;
+        std::cout << "first: " << it->first;
+        // std::cout << "second: " << it->first;
+        ev.events = EPOLLIN;
+        ev.data.fd = listenSock;
+
+        if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, listenSock, &ev) == -1)
+        {
+            perror("epoll_ctl: listen_sock");
+            exit(EXIT_FAILURE);
+        }
     }
-    static int pp;
+    printf("hello\n");
     while (true)
     {
+        std::cout << "wach wach\n" << "epoll_fd" << epoll_fd << std::endl;
         int nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
-        std::cout << "hello\n";
+        std::cout << "wach wach\n" << " nfds " << nfds << std::endl;
         if (nfds == -1)
         {
             perror("epoll_wait");
             exit(EXIT_FAILURE);
         }
-
+        std::cout << "neymar0\n" << nfds << std::endl;
         for (int n = 0; n < nfds; n++)
         {
             int current_fd = events[n].data.fd;
             std::cout << "events: " << events[n].data.fd << std::endl;
-            if (current_fd == sockfd)
+            if (info.find(current_fd) != info.end()) // Check if it's a listening socket            {
             {
+                std::cout << "neymar\n";
                 struct sockaddr_in clientAddr;
                 socklen_t clientAddrLen = sizeof(clientAddr);
                 int new_socket = accept(sockfd, (struct sockaddr *)&clientAddr, &clientAddrLen);
@@ -1605,7 +1688,7 @@ void Server::run()
                     continue;
                 }
                 setNonBlocking(new_socket);
-                ev.events = EPOLLIN | EPOLLET;
+                ev.events = EPOLLIN;
                 ev.data.fd = new_socket;
                 if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, new_socket, &ev) == -1)
                 {
@@ -1614,7 +1697,6 @@ void Server::run()
                     exit(1);
                 }
                 client_socket[new_socket] = new_socket;
-                std::cout << "new clientfd: " << new_socket << std::endl;
                 requests[new_socket] = HTTPRequest();
             }
             else
@@ -1624,14 +1706,11 @@ void Server::run()
                 if (valread > 0)
                 {
                     requests[current_fd].appendData(buffer, valread);
-                    std::cout << "check: " << pp++ << std::endl;
                     if (requests[current_fd].isComplete())
                     {
                         try
                         {
-                            std::cout << "wach\n";
                             requests[current_fd].parse(requests[current_fd].rawRequest);
-                            std::cout << "hello\n";
                             if (requests[current_fd].method == "GET")
                                 handleRequestGET(current_fd, requests[current_fd], serverConfig);
                             else if (requests[current_fd].method == "POST")
@@ -1659,17 +1738,32 @@ void Server::run()
 }
 
 
-int main(int argc, char **argv) {
-    try {
+int main(int argc, char **argv)
+{
+    try
+    {
         configFile cFile(argc, argv);
         servers start(cFile);
-        informations config = start.getServerInfo(0);         Server myServer(config);
-        myServer.createSocket();
-        myServer.bindSocket(8080, "127.0.0.1");
-        myServer.listenToSocket();
-        std::cout << "Server is running..." << std::endl;
-        myServer.run();
-    } catch (std::exception& e) {
+        std::map<int, informations> allserver =  start.getMap();
+        for (auto& it : allserver)
+        {
+            std::cout << "first: " << it.first << std::endl;
+        }
+        for(std::map<int, informations>::iterator it = allserver.begin(); it != allserver.end(); ++it)
+        {
+            Server myServer(it->second.port, it->second.host);
+            myServer.initializeInfo(allserver);
+            // informations config = it->second;
+            allserver[it->first] = it->second;
+            myServer.getInfo() = allserver;
+            if (!myServer.createSocket() || !myServer.bindSocket() || !myServer.listenToSocket())
+                continue; // Skip this server if any operation fails
+            std::cout << "Server on port " << it->second.port["listen"] << " and IP " << it->second.host["host"] << " is running..." << std::endl;
+            myServer.run();
+        }
+    }
+    catch (std::exception& e)
+    {
         std::cerr << "Error: " << e.what() << std::endl;
         return EXIT_FAILURE;
     }

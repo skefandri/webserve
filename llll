@@ -1,4 +1,5 @@
-
+User
+this is my full code and I test seige for multiple client send a request and wait for response but my code failed can you fix the problem please : 
 
 # include <iostream>
 # include <cstddef>
@@ -847,7 +848,7 @@ int servers::fillInfos(void)
 #include <sys/stat.h>
 #include <sys/epoll.h>
 
-#define MAX_CLIENTS 1000
+#define MAX_CLIENTS 30
 
 class HTTPRequest
 {
@@ -879,12 +880,14 @@ class Server
         int epoll_fd;
         static const int MAX_EVENTS = 10;
     public:
+        void setupEpoll();
         void run();
         Server();
         Server(informations config);
         int createSocket();
         void bindSocket(int port, const std::string& ip);
         void listenToSocket();
+        void handleConnections();
         std::string readFileContent(const std::string& filePath);
         void handleRequestGET( int clientSocket,  HTTPRequest& request,  informations& serverConfig);
         std::string getMimeType(std::string& filePath);
@@ -895,6 +898,10 @@ class Server
         location findRouteConfig(std::string& uri, informations& serverConfig);
         void sendErrorResponse(int clientSocket, int errorCode,const std::string& errorMessage);
         void setConfig(const informations& config);
+        void acceptNewConnection();
+        void handleExistingConnections(fd_set& read_fds);
+        void initializeFileDescriptorSet(fd_set& read_fds, int& max_sd);
+        void processRequest(int clientSocket, HTTPRequest& request);
         bool isDirectory(const std::string& path);
         std::string generateDirectoryListing(const std::string& path);
 };
@@ -938,9 +945,6 @@ void Server::bindSocket(int port, const std::string& ip)
     serverAddr.sin_family = AF_INET;
     serverAddr.sin_port = htons(port);
     serverAddr.sin_addr.s_addr = inet_addr(ip.c_str());
-    int opt = 1;
-    setsockopt(sockfd, SOL_SOCKET, SO_REUSEADDR | SO_REUSEPORT, &opt, sizeof(opt));
-
     if (bind(sockfd, (struct sockaddr *)&serverAddr, sizeof(serverAddr)) < 0)
         exitWithError("Failed to bind Socket");
 }
@@ -973,13 +977,13 @@ void HTTPRequest::parse(std::string& rawRequest)
 {
     std::istringstream requestStream(rawRequest);
     std::string line;
-    // std::cout << "from Parse pro\n";
+    std::cout << "from Parse pro\n";
     if (!readLine(requestStream, line))
         throw std::runtime_error("Wrong request line");
     std::istringstream requestLineStream(line);
     if (!(requestLineStream >> method >> uri >> httpVersion))
         throw std::runtime_error("Wrong request line");
-    // std::cout << "===uri: " << uri << std::endl;
+    std::cout << "===uri: " << uri << std::endl;
     size_t queryPos = uri.find('?');
     if (queryPos != std::string::npos) {
         std::string queryString = uri.substr(queryPos + 1);
@@ -1006,7 +1010,7 @@ void HTTPRequest::parse(std::string& rawRequest)
         else
             throw std::runtime_error("Wrong header line");
     }
-    // std::cout << "try to be pro and read the body\n";
+    std::cout << "try to be pro and read the body\n";
 
     // Determine body parsing strategy
     bool contentLengthHeaderFound = headers.find("content-length") != headers.end();
@@ -1047,7 +1051,7 @@ void HTTPRequest::parse(std::string& rawRequest)
 std::string Server::readFileContent(const std::string& filePath)
 {
     std::ifstream file(filePath.c_str());
-    // std::cout << filePath << std::endl;
+    std::cout << filePath << std::endl;
     if (!file)
         exitWithError("Error: Unable to open file.");
     std::string content;
@@ -1067,7 +1071,6 @@ bool HTTPRequest::isComplete()
 {
     // Check if the end of the headers section is found
     size_t headerEnd = this->rawRequest.find("\r\n\r\n");
-    // size_t headerEnd2 = this->rawRequest.find("\n\n");
     if (headerEnd == std::string::npos)
         return false; // The end of headers not yet received
 
@@ -1083,7 +1086,6 @@ bool HTTPRequest::isComplete()
 
             // Check if the body length is equal to the Content-Length value
             size_t bodyStart = headerEnd + 4; // Length of "\r\n\r\n"
-            // size_t bodyStart2 = headerEnd2 + 2; // Length of "\r\n\r\n"
             if (this->rawRequest.length() - bodyStart < static_cast<size_t>(contentLength))
                 return false; // The body is not fully received
         }
@@ -1143,20 +1145,20 @@ struct MultipartFormData
 
 std::map<std::string, std::string> parseUrlEncoded(const std::string& body)
 {
-    // std::cout << "body2: " << body << std::endl;
+    std::cout << "body2: " << body << std::endl;
     std::map<std::string, std::string> data;
     std::istringstream stream(body);
     std::string pair;
 
     while (std::getline(stream, pair, '&'))
     {
-        // std::cout << "pair: " << pair << std::endl;
+        std::cout << "pair: " << pair << std::endl;
         size_t delimiter_pos = pair.find('=');
         if (delimiter_pos != std::string::npos)
         {
             std::string key = pair.substr(0, delimiter_pos);
             std::string value = pair.substr(delimiter_pos + 1);
-            // std::cout << "key: " << key << " value: " << value << std::endl;
+            std::cout << "key: " << key << " value: " << value << std::endl;
             data[key] = value;
         }
     }
@@ -1261,12 +1263,12 @@ void Server::handleRequestPOST(int clientSocket, HTTPRequest& request)
 {
     // Check Content-Type header
     std::string contentType = request.headers["content-type"].front();
-    // std::cout << "POST contentType: " << contentType << std::endl;
+    std::cout << "POST contentType: " << contentType << std::endl;
 
     if (contentType.find("application/x-www-form-urlencoded") != std::string::npos)
     {
-        // std::cout << "Content dkhal l application/x-www-form-urlencoded\n";
-        // std::cout << "body: " << request.body << std::endl;
+        std::cout << "Content dkhal l application/x-www-form-urlencoded\n";
+        std::cout << "body: " << request.body << std::endl;
         std::map<std::string, std::string> formData = parseUrlEncoded(request.body);
     }
     else if (contentType.find("multipart/form-data") != std::string::npos)
@@ -1361,36 +1363,36 @@ void Server::sendErrorResponse(int clientSocket, int errorCode,const std::string
 std::string Server::mapUriToFilePath(std::string& uri, location& routeConfig)
 {
     std::string filePath;
-    // std::cout << "uri: " << uri << std::endl;
+    std::cout << "uri: " << uri << std::endl;
     std::map<std::string, std::string>::iterator rootIt = routeConfig.root.find("root");
     if (rootIt != routeConfig.root.end())
     {
         filePath = rootIt->second;
-        // std::cout<<"dkhal hna: " << rootIt->second << std::endl;
+        std::cout<<"dkhal hna: " << rootIt->second << std::endl;
     }
     else
         filePath = "/var/www/html"; // Default path
 
     if (uri == "/")
     {
-        // std::cout << "slash:\n";
+        std::cout << "slash:\n";
         std::map<std::string, std::string>::iterator indexIt = routeConfig.index.find("index");
         if (indexIt != routeConfig.index.end() && !indexIt->second.empty())
         {
-            // std::cout << "indexIt->second: " << indexIt->second << std::endl;
+            std::cout << "indexIt->second: " << indexIt->second << std::endl;
             filePath += "/" + indexIt->second;
         }
         else
         {
             filePath += "/index.html"; // Default index file
-            // std::cout << "FILE: " << filePath << std::endl;
+            std::cout << "FILE: " << filePath << std::endl;
         }
     }
     else
     {
-        // std::cout << "filePath: " << filePath << "uri: " << uri << std::endl;
+        std::cout << "filePath: " << filePath << "uri: " << uri << std::endl;
         filePath += uri;
-        // std::cout << "+uri: " << filePath << std::endl;
+        std::cout << "+uri: " << filePath << std::endl;
     }
     return filePath;
 }
@@ -1404,10 +1406,10 @@ location Server::findRouteConfig(std::string& uri,  informations& serverConfig)
         if (it != loc.directory.end())
         {
             std::string& locPath = it->second;
-            // std::cout << "localpath: " << locPath << std::endl;
+            std::cout << "localpath: " << locPath << std::endl;
             if (uri.compare(0, locPath.length(), locPath) == 0)
             {
-                // std::cout << "second: " << loc.index.size() << std::endl;
+                std::cout << "second: " << loc.index.size() << std::endl;
                 return loc; // Found a matching location
             }
         }
@@ -1494,7 +1496,6 @@ std::string Server::generateDirectoryListing(const std::string& path) {
     html << "</pre><hr></body></html>";
     return html.str();
 }
-
 void Server::handleRequestDELETE(int clientSocket, HTTPRequest& request, informations& serverConfig)
 {
     // Determine the route based on the request URI
@@ -1513,24 +1514,21 @@ void Server::handleRequestDELETE(int clientSocket, HTTPRequest& request, informa
     stat(filePath.c_str(), &path_stat);
 
     // Check if the file/directory exists
-    if (access(filePath.c_str(), F_OK) == -1)
-    {
+    if (access(filePath.c_str(), F_OK) == -1) {
         sendErrorResponse(clientSocket, 404, "Not Found");
         return;
     }
 
     // Check for necessary permissions
-    if (access(filePath.c_str(), W_OK) == -1)
-    {
+    if (access(filePath.c_str(), W_OK) == -1) {
         sendErrorResponse(clientSocket, 403, "Forbidden");
         return;
     }
 
     // Check if it's a directory and handle accordingly
-    if (S_ISDIR(path_stat.st_mode))
-    {
+    if (S_ISDIR(path_stat.st_mode)) {
         // Handle directory deletion here
-        sendErrorResponse(clientSocket, 403, "Forbidden: Cannot delete directory");
+        // sendErrorResponse(clientSocket, 403, "Forbidden: Cannot delete directory");
         return;
     }
 
@@ -1539,9 +1537,16 @@ void Server::handleRequestDELETE(int clientSocket, HTTPRequest& request, informa
         sendErrorResponse(clientSocket, 500, "Internal Server Error");
         return;
     }
+
+    // Log the successful deletion
+    // log("File deleted: " + filePath);
+
+    // Send a success response
     std::string response = "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n";
     send(clientSocket, response.c_str(), response.size(), 0);
 }
+
+
 
 void setNonBlocking(int sock)
 {
@@ -1557,11 +1562,9 @@ void setNonBlocking(int sock)
 		exit(EXIT_FAILURE);
 	}
 }
-#include<csignal>
 
 void Server::run()
 {
-    signal(SIGPIPE, SIG_IGN);
     struct epoll_event ev, events[MAX_EVENTS];
 
     epoll_fd = epoll_create(1);
@@ -1579,21 +1582,19 @@ void Server::run()
         perror("epoll_ctl: listen_sock");
         exit(EXIT_FAILURE);
     }
-    static int pp;
+
     while (true)
     {
         int nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, -1);
         std::cout << "hello\n";
-        if (nfds == -1)
-        {
+        if (nfds == -1) {
             perror("epoll_wait");
             exit(EXIT_FAILURE);
         }
 
-        for (int n = 0; n < nfds; n++)
+        for (int n = 0; n < nfds; ++n)
         {
             int current_fd = events[n].data.fd;
-            std::cout << "events: " << events[n].data.fd << std::endl;
             if (current_fd == sockfd)
             {
                 struct sockaddr_in clientAddr;
@@ -1611,27 +1612,20 @@ void Server::run()
                 {
                     perror("epoll_ctl: new_socket");
                     close(new_socket);
-                    exit(1);
                 }
                 client_socket[new_socket] = new_socket;
-                std::cout << "new clientfd: " << new_socket << std::endl;
                 requests[new_socket] = HTTPRequest();
             }
             else
             {
-                char buffer[1024];
-                int valread = read(current_fd, buffer, 1024);
-                if (valread > 0)
-                {
+                // Handle IO on existing connection
+                char buffer[1024] = {0};
+                int valread = read(current_fd, buffer, sizeof(buffer));
+                if (valread > 0) {
                     requests[current_fd].appendData(buffer, valread);
-                    std::cout << "check: " << pp++ << std::endl;
-                    if (requests[current_fd].isComplete())
-                    {
-                        try
-                        {
-                            std::cout << "wach\n";
+                    if (requests[current_fd].isComplete()) {
+                        try {
                             requests[current_fd].parse(requests[current_fd].rawRequest);
-                            std::cout << "hello\n";
                             if (requests[current_fd].method == "GET")
                                 handleRequestGET(current_fd, requests[current_fd], serverConfig);
                             else if (requests[current_fd].method == "POST")
@@ -1641,17 +1635,18 @@ void Server::run()
                             else
                                 sendErrorResponse(current_fd, 501, "Not Implemented");
                             requests[current_fd].clear();
-                        }
-                        catch (std::runtime_error& e) {
+                        } catch (std::runtime_error& e) {
                             sendErrorResponse(current_fd, 400, e.what());
                         }
                     }
                 }
                 else
                 {
+                    if (valread == 0 || (valread < 0 && (errno != EAGAIN && errno != EWOULDBLOCK))) {
                         close(current_fd);
                         client_socket[n] = -1;
                         requests.erase(current_fd);
+                    }
                 }
             }
         }
@@ -1663,7 +1658,8 @@ int main(int argc, char **argv) {
     try {
         configFile cFile(argc, argv);
         servers start(cFile);
-        informations config = start.getServerInfo(0);         Server myServer(config);
+        informations config = start.getServerInfo(0); // Implement getServerInfo in the servers class
+        Server myServer(config);
         myServer.createSocket();
         myServer.bindSocket(8080, "127.0.0.1");
         myServer.listenToSocket();
@@ -1676,3 +1672,36 @@ int main(int argc, char **argv) {
     return EXIT_SUCCESS;
 }
 
+[alert] socket: select and discovered it's not ready sock.c:384: Connection timed out
+[alert] socket: read check timed out(30) sock.c:273: Connection timed out
+[alert] socket: read check timed out(30) sock.c:273: Connection timed out
+[alert] socket: select and discovered it's not ready sock.c:384: Connection timed out
+[alert] socket: read check timed out(30) sock.c:273: Connection timed out
+[alert] socket: read check timed out(30) sock.c:273: Connection timed out
+[alert] socket: read check timed out(30) sock.c:273: Connection timed out
+[alert] socket: select and discovered it's not ready sock.c:384: Connection timed out
+[alert] socket: read check timed out(30) sock.c:273: Connection timed out
+[alert] socket: select and discovered it's not ready sock.c:384: Connection timed out
+[alert] socket: read check timed out(30) sock.c:273: Connection timed out
+[alert] socket: read check timed out(30) sock.c:273: Connection timed out
+[alert] socket: read check timed out(30) sock.c:273: Connection timed out
+[alert] socket: read check timed out(30) sock.c:273: Connection timed out
+[alert] socket: read check timed out(30) sock.c:273: Connection timed out
+[alert] socket: read check timed out(30) sock.c:273: Connection timed out
+[alert] socket: select and discovered it's not ready sock.c:384: Connection timed out
+[alert] socket: read check timed out(30) sock.c:273: Connection timed out
+[alert] socket: read check timed out(30) sock.c:273: Connection timed out
+[alert] socket: read check timed out(30) sock.c:273: Connection timed out
+[alert] socket: select and discovered it's not ready sock.c:384: Connection timed out
+[alert] socket: read check timed out(30) sock.c:273: Connection timed out
+[alert] socket: read check timed out(30) sock.c:273: Connection timed out
+[alert] socket: read check timed out(30) sock.c:273: Connection timed out
+[alert] socket: read check timed out(30) sock.c:273: Connection timed out
+[alert] socket: read check timed out(30) sock.c:273: Connection timed out
+[alert] socket: select and discovered it's not ready sock.c:384: Connection timed out
+[alert] socket: read check timed out(30) sock.c:273: Connection timed out
+[alert] socket: read check timed out(30) sock.c:273: Connection timed out
+[alert] socket: select and discovered it's not ready sock.c:384: Connection timed out
+[alert] socket: read check timed out(30) sock.c:273: Connection timed out
+[alert] socket: select and discovered it's not ready sock.c:384: Connection timed out
+[alert] socket: read check timed out(30) sock.c:273: Connection timed out
