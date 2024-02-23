@@ -10,8 +10,8 @@ server     #hello
 	limit_client_body          1;
 	      error_page     301   /home/zasabri/Desktop/errors;
 	      error_page      304  /home/zasabri/Desktop/errorsat;
-location   ../ {
-		root	../ 	 ; 		  #hi 
+location   ./ {
+		root	./ 	 ; 		  #hi 
 		index	index.html index.php index.py; 
 			allowed_methodes GET;
 		autoindex       on  	    ;  

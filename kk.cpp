@@ -857,3 +857,203 @@ void HTTPRequest::validateHeaders()
         // Further validation for Content-Length value can be added here
     }
 }
+svduoV>HBjasyhop
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+void Server::handleRequestGET(int clientSocket, HTTPRequest& request, informations& serverConfig)
+{
+    location routeConfig = findRouteConfig(request.uri, serverConfig);
+    if (routeConfig.allowed_methodes["allowed_methodes"].find("GET") == std::string::npos)
+    {    
+        sendErrorResponse(clientSocket, 405, "Method Not Allowed");
+        return;
+    }
+
+    std::string filePath = mapUriToFilePath(request.uri, routeConfig);
+
+    if (isDirectory(filePath))
+    {
+        std::map<std::string, std::string>::iterator autoindexIt = routeConfig.autoindex.find("autoindex");
+        if (autoindexIt != routeConfig.autoindex.end() && autoindexIt->second == "on")
+        {
+            std::string directoryContent = generateDirectoryListing(filePath);
+            sendChunkedResponse(clientSocket, "text/html", directoryContent);
+        }
+        else
+        {
+            std::string defaultFilePath = getDefaultFileIfExist(filePath, routeConfig);
+            if (!defaultFilePath.empty() && fileExists(defaultFilePath))
+            {
+                sendFileContent(clientSocket, defaultFilePath);
+            }
+            else
+            {
+                sendErrorResponse(clientSocket, 404, "Not Found");
+            }
+        }
+    }
+    else
+    {
+        if (fileExists(filePath))
+        {
+            sendFileContent(clientSocket, filePath);
+        }
+        else
+        {
+            sendErrorResponse(clientSocket, 404, "Not Found");
+        }
+    }
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+void Server::handleRequestGET(int clientSocket, HTTPRequest& request, informations& serverConfig)
+{
+    location routeConfig = findRouteConfig(request.uri, serverConfig);
+    if (routeConfig.allowed_methodes["allowed_methodes"].find("GET") == std::string::npos)
+    {    
+        sendErrorResponse(clientSocket, 404, "Method Not allowed");
+        return;
+    }
+
+    std::string filePath = mapUriToFilePath(request.uri, routeConfig);
+    std::string response;
+
+    if (isDirectory(filePath))
+    {
+        std::vector<location>::iterator it = serverConfig.locationsInfo.begin();
+        std::string check = request.uri + it->index["index"];
+        if (isRegularFile(check))
+        {
+            response = "HTTP/1.1 301 Moved Permanently\r\nLocation: " + check + "\r\n\r\n";
+        }
+        else
+        {
+            std::map<std::string, std::string>::iterator autoindexIt = routeConfig.autoindex.find("autoindex");
+            if (autoindexIt != routeConfig.autoindex.end() && autoindexIt->second == "on")
+            {
+                std::string directoryContent = generateDirectoryListing(filePath);
+                response = "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\n";
+                response += "Content-Length: " + to_string(directoryContent.size()) + "\r\n\r\n";
+                response += directoryContent;
+            }
+        }
+    }
+    else
+    {
+        if (!fileExists(filePath))
+        {
+            response = "HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n";
+        }
+        else
+        {
+            response = "HTTP/1.1 200 OK\r\n";
+            response += "Content-Type: " + getMimeType(filePath) + "\r\n";
+            response += "Transfer-Encoding: chunked\r\n\r\n";
+            // Additional code to handle chunked response might be needed here
+        }
+    }
+
+    // Store the response in the ResponseData structure
+    ResponseData responseData;
+    responseData.responseBuffer = response;
+    responseData.totalSize = response.size();
+    responseData.status = ResponseData::Pending;
+
+    // Map the response data to the client's socket file descriptor
+    clientResponses[clientSocket] = responseData;
+
+    // Modify epoll to check for EPOLLOUT for this client socket
+    // This part is assumed to be handled in your epoll event loop
+}
+

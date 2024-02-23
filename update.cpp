@@ -861,16 +861,49 @@ class HTTPRequest
         std::string body;
         std::map<std::string, std::string> queryParams;
         std::string rawRequest;
-        void parse(std::string& rawRequest);
+        bool headersComplete;
+        int flag;
+        bool respense;
+        void parse();
         void clear();
         bool isComplete();
         void appendData(const char* buffer, int length);
         HTTPRequest();
-    std::string decodeURI(const std::string& uri);
-
+        std::string decodeURI(const std::string& uri);
+        void readHeaders(int clientSocket, HTTPRequest& request);
     std::string getFullRequest() const;
 };
+typedef struct ResponseData
+{
+    std::string responseBuffer;  // Buffer holding the response data
+    size_t totalSize;            // Total size of the response
+    size_t bytesSent;          // Number of bytes sent so far
+    enum Status { Pending, InProgress, Complete } status; // Response status
+    int flag;
+    std::ifstream files;
+    ResponseData();
+    ResponseData(const ResponseData& other) : responseBuffer(other.responseBuffer), 
+                                          totalSize(other.totalSize), 
+                                          bytesSent(other.bytesSent), 
+                                          status(other.status), 
+                                          flag(other.flag) 
+    {
+        // Copy constructor logic here
+    }
 
+    ResponseData& operator=(const ResponseData& other) {
+        if (this != &other)
+        {
+            responseBuffer = other.responseBuffer;
+            // Do not copy fileStream, as std::ifstream is not copyable
+            totalSize = other.totalSize;
+            bytesSent = other.bytesSent;
+            status = other.status;
+        }
+        return *this;
+    }
+    // Constructor to initialize the structure with default values
+} ResponseData;
 
 class Server
 {
@@ -884,6 +917,8 @@ class Server
         static const int MAX_EVENTS = 10;
         std::string      port;
         std::string      host;
+        std::map<int, ResponseData> clientResponses;
+        int flagstream;
     public:
         int numberServers;
         void initializeEpoll();
@@ -897,7 +932,7 @@ class Server
         void bindSocket();
         void listenToSocket();
         void handleConnections();
-        std::string readFileContent(const std::string& filePath);
+        void readFileContent(int fd, const std::string& filePath);
         void handleRequestGET( int clientSocket,  HTTPRequest& request,  informations& serverConfig);
         std::string getMimeType(std::string& filePath);
         void handleRequestPOST(int clientSocket,  HTTPRequest& request);   
@@ -916,18 +951,27 @@ class Server
         std::string generateDirectoryListing(const std::string& path);
         void handleCGIRequest(int clientSocket, HTTPRequest& request, informations& serverConfig);
         std::string getScriptPathFromURI(const std::string& uri);
+    void sendResponseChunk(int clientSocket, ResponseData& respData);
 };
 
 #include<set>
 
+ResponseData::ResponseData()
+{
+    totalSize = 0;
+    bytesSent = 0;
+    status = Pending;
+    flag = 0;
+}
 
 Server::Server()
 {
+    flagstream = 0;
     memset(client_socket, 0, sizeof(client_socket));
 }
 
 Server::Server(int exitSocket, informations &config , std::string& port, std::string& host)
-: sockfd(exitSocket)
+: sockfd(exitSocket), flagstream(0)
 {
     this->port = port;
     this->host = host;
@@ -956,6 +1000,7 @@ void exitWithError(const std::string& errorMessage)
 
 int createAndBindSocket(const std::string& port, const std::string& host)
 {
+    (void)host;
     int sockfd;
     struct sockaddr_in serverAddr;
     sockfd = socket(AF_INET, SOCK_STREAM, 0);
@@ -987,7 +1032,7 @@ int createAndBindSocket(const std::string& port, const std::string& host)
     // Bind socket
     bzero((char *) &serverAddr, sizeof(serverAddr));
     serverAddr.sin_family = AF_INET;
-    serverAddr.sin_addr.s_addr = inet_addr(host.c_str());
+    serverAddr.sin_addr.s_addr = 0;
     serverAddr.sin_port = htons(atoi(port.c_str()));
     if (bind(sockfd, (struct sockaddr *) &serverAddr, sizeof(serverAddr)) < 0)
     {
@@ -995,7 +1040,6 @@ int createAndBindSocket(const std::string& port, const std::string& host)
         close(sockfd);
         exit(1);
     }
-
     return sockfd;
 }
 
@@ -1016,7 +1060,7 @@ bool readLine(std::istringstream& requestStream, std::string& line)
     return requestStream.good();
 }
 
-HTTPRequest::HTTPRequest() : method(""), uri(""), httpVersion(""), body(""), rawRequest("") {}
+HTTPRequest::HTTPRequest() : method(""), uri(""), httpVersion(""), body(""), rawRequest(""), headersComplete(false), flag(0), respense(false) {}
 
 void toLowerCase(std::string& s)
 {
@@ -1024,132 +1068,6 @@ void toLowerCase(std::string& s)
         s[i] = std::tolower(s[i]);
 }
 
-std::string HTTPRequest::decodeURI(const std::string& uri)
-{
-    std::string result;
-    for (std::size_t i = 0; i < uri.length(); ++i)
-    {
-        if (uri[i] == '%' && i + 2 < uri.length())
-        {
-            std::string hex = uri.substr(i + 1, 2);
-            std::cout << "hex: " << hex << std::endl;
-            std::stringstream ss;
-            int ch;
-            ss << std::hex << hex;
-            ss >> ch;
-            std::cout << "ch: " << ch << std::endl;
-            result += static_cast<char>(ch);
-            std::cout << "result: " << result << std::endl;
-            i += 2;  // Skip next two characters
-        }
-        else
-            result += uri[i];
-    }
-    return result;
-}
-
-void HTTPRequest::parse(std::string& rawRequest)
-{
-    std::istringstream requestStream(rawRequest);
-    std::string line;
-    if (!readLine(requestStream, line))
-        throw std::runtime_error("Wrong request line");
-    std::istringstream requestLineStream(line);
-    if (!(requestLineStream >> method >> uri >> httpVersion))
-        throw std::runtime_error("Wrong request line");
-    if (method != "GET" && method != "POST" && method != "DELETE")
-        throw std::runtime_error("Unsupported HTTP method");
-    if (httpVersion != "HTTP/1.1")
-        throw std::runtime_error("Unsupported HTTP Version");
-
-    size_t queryPos = uri.find('?');
-    if (queryPos != std::string::npos)
-    {
-        std::string queryString = uri.substr(queryPos + 1);
-        uri = uri.substr(0, queryPos);
-        std::istringstream queryStream(queryString);
-        std::string param;
-        while (std::getline(queryStream, param, '&'))
-        {
-            size_t equalPos = param.find('=');
-            if (equalPos != std::string::npos)
-                queryParams[param.substr(0, equalPos)] = param.substr(equalPos + 1);
-        }
-    }
-
-    this->uri = decodeURI(uri);
-    // Parse headers
-    while (readLine(requestStream, line) && !line.empty())
-    {
-        std::istringstream headerLineStream(line);
-        std::string key, value;
-        if (std::getline(headerLineStream, key, ':') && std::getline(headerLineStream, value))
-        {
-            toLowerCase(key);
-            headers[key].push_back(value.substr(value.find_first_not_of(" ")));
-        }
-        else
-            throw std::runtime_error("Wrong header line");
-    }
-    if (headers.find("host") == headers.end() || headers["host"].empty())
-        throw std::runtime_error("Host header is missing");
-    if (headers["content-length"].empty())
-        throw std::runtime_error("Content-Length header is missing for POST request");
-    if ((headers.find("transfer-encoding") != headers.end() && headers["transfer-encoding"][0] != "chunked"))
-        throw std::runtime_error("transfer-encoding header is missing for POST request");
-    if (method == "POST")
-    {
-        // Determine body parsing strategy
-        bool contentLengthHeaderFound = headers.find("content-length") != headers.end();
-        bool transferEncodingHeaderFound = headers.find("transfer-encoding") != headers.end() && !headers["transfer-encoding"].empty();
-
-        // Parse body based on headers
-        if (contentLengthHeaderFound)
-        {
-            int length = std::atoi(headers["content-length"][0].c_str());
-            if (length > 0)
-            {
-                std::vector<char> buffer(length);
-                requestStream.read(&buffer[0], length);
-                body.assign(buffer.begin(), buffer.end());
-            }
-        }
-        else if (transferEncodingHeaderFound && headers["transfer-encoding"][0] == "chunked")
-        {
-            while (true)
-            {
-                std::string chunkSizeStr;
-                std::getline(requestStream, chunkSizeStr);
-                unsigned int chunkSize;
-                std::istringstream(chunkSizeStr) >> std::hex >> chunkSize;
-                if (chunkSize == 0)
-                    break;
-                std::vector<char> buffer(chunkSize);
-                requestStream.read(&buffer[0], chunkSize);
-                body.append(buffer.begin(), buffer.end());
-                // Consume trailing newline
-                std::string temp;
-                std::getline(requestStream, temp);
-            }
-        }
-    }
-}
-
-
-std::string Server::readFileContent(const std::string& filePath)
-{
-    std::ifstream file(filePath.c_str());
-    // std::cout << filePath << std::endl;
-    if (!file)
-        exitWithError("Error: Unable to open file.");
-    std::string content;
-    std::string line;
-    while (std::getline(file, line))
-        content += line + "\n";
-
-    file.close();
-    return content;
-}
 void HTTPRequest::appendData(const char* buffer, int length)
 {
     this->rawRequest.append(buffer, length);
@@ -1159,35 +1077,16 @@ bool HTTPRequest::isComplete()
 {
     // Check if the end of the headers section is found
     size_t headerEnd = this->rawRequest.find("\r\n\r\n");
-    // size_t headerEnd2 = this->rawRequest.find("\n\n");
-    if (headerEnd == std::string::npos)
+    size_t headerEnd2 = this->rawRequest.find("\n\n");
+    if (headerEnd == std::string::npos || headerEnd2 == std::string::npos)
         return false; // The end of headers not yet received
-
-    // Check for "Content-Length" header if the method is POST or PUT
-    if (this->method == "POST")
-    {
-        size_t contentLengthHeader = this->rawRequest.find("Content-Length: ");
-        if (contentLengthHeader != std::string::npos)
-        {
-            size_t start = contentLengthHeader + 16; // Length of "Content-Length: "
-            size_t end = this->rawRequest.find("\r\n", start);
-            int contentLength = std::atoi(this->rawRequest.substr(start, end - start).c_str());
-
-            // Check if the body length is equal to the Content-Length value
-            size_t bodyStart = headerEnd + 4; // Length of "\r\n\r\n"
-            // size_t bodyStart2 = headerEnd2 + 2; // Length of "\r\n\r\n"
-            if (this->rawRequest.length() - bodyStart < static_cast<size_t>(contentLength))
-                return false; // The body is not fully received
-        }
-    }
-
     return true; // Headers and body (if applicable) are fully received
 }
 
 
 void HTTPRequest::clear()
 {
-    // Clear all the member variables to their default state
+    // Clear all the member variables to thei0r default state
     this->method.clear();
     this->uri.clear();
     this->httpVersion.clear();
@@ -1521,28 +1420,29 @@ void Server::handleRequestGET(int clientSocket, HTTPRequest& request, informatio
 
     std::string filePath = filePath2;
     // Check if the path is a directory
+    std::string response;
     if (isDirectory(filePath))
     {
         std::vector<location>::iterator it = serverConfig.locationsInfo.begin();
         std::string check = request.uri + it->index["index"];
+        std::map<std::string, std::string>::iterator autoindexIt = routeConfig.autoindex.find("autoindex");
         if (isRegularFile(check))
         {
-            std::string response = "HTTP/1.1 301 OK\r\n";
+            response = "HTTP/1.1 301 OK\r\n";
             response += "Location: " + check + " \r\n";
             response += "\r\n";
-            send(clientSocket, response.c_str(), response.size(), 0);
+            // send(clientSocket, response.c_str(), response.size(), 0);
         }
-        std::map<std::string, std::string>::iterator autoindexIt = routeConfig.autoindex.find("autoindex");
-        if (autoindexIt != routeConfig.autoindex.end() && autoindexIt->second == "on")
+        else if (autoindexIt != routeConfig.autoindex.end() && autoindexIt->second == "on")
         {
             std::string directoryContent = generateDirectoryListing(filePath);
             std::cout << directoryContent << std::endl;
-            std::string response = "HTTP/1.1 200 OK\r\n";
+            response = "HTTP/1.1 200 OK\r\n";
             response += "Content-Type: text/html\r\n";
             response += "Content-Length: " + to_string(directoryContent.size()) + "\r\n";
             response += "\r\n";
             response += directoryContent;
-            send(clientSocket, response.c_str(), response.size(), 0);
+            // send(clientSocket, response.c_str(), response.size(), 0);//I must check ready to write and than I will send
          }
     }
     else
@@ -1554,14 +1454,17 @@ void Server::handleRequestGET(int clientSocket, HTTPRequest& request, informatio
             sendErrorResponse(clientSocket, 404, "Not Found");
             return;
         }
-        std::string fileContent = readFileContent(filePath);
-        std::string response = "HTTP/1.1 200 OK\r\n";
+        response = "HTTP/1.1 200 OK\r\n";
         response += "Content-Type: " + getMimeType(filePath) + "\r\n";
-        response += "Content-Length: " + to_string(fileContent.size()) + "\r\n";
+        response += "Transfer-Encoding: chunked\r\n";
         response += "\r\n";
-        response += fileContent;
-        send(clientSocket, response.c_str(), response.size(), 0);
+        // send(clientSocket, response.c_str(), response.size(), 0);
+        // readFileContent(clientSocket, filePath);
     }
+    ResponseData responseData;
+    responseData.responseBuffer = response;
+    responseData.status = ResponseData::InProgress;
+    clientResponses[clientSocket] = responseData;
 }
 
 bool Server::isRegularFile(const std::string& path)
@@ -1730,82 +1633,269 @@ void Server::initializeEpoll()
     }
 }
 
+std::string HTTPRequest::decodeURI(const std::string& uri)
+{
+    std::string result;
+    for (std::size_t i = 0; i < uri.length(); ++i)
+    {
+        if (uri[i] == '%' && i + 2 < uri.length())
+        {
+            std::string hex = uri.substr(i + 1, 2);
+            std::cout << "hex: " << hex << std::endl;
+            std::stringstream ss;
+            int ch;
+            ss << std::hex << hex;
+            ss >> ch;
+            std::cout << "ch: " << ch << std::endl;
+            result += static_cast<char>(ch);
+            std::cout << "result: " << result << std::endl;
+            i += 2;
+        }
+        else
+            result += uri[i];
+    }
+    return result;
+}
+
+void HTTPRequest::readHeaders(int clientSocket, HTTPRequest& request)
+{
+    char buffer[1024];
+    ssize_t bytesRead;
+
+    // Read from the socket
+    bytesRead = read(clientSocket, buffer, 1024);
+    rawRequest.append(buffer, bytesRead);
+    std::istringstream requestStream(request.rawRequest);
+    std::string line;
+    if (flag == 0)
+    {
+        if (!readLine(requestStream, line))
+            throw std::runtime_error("Wrong request line");
+        std::istringstream requestLineStream(line);
+        if (!(requestLineStream >> method >> uri >> httpVersion))
+            throw std::runtime_error("Wrong request line");
+        if (method != "GET" && method != "POST" && method != "DELETE")
+            throw std::runtime_error("Unsupported HTTP method");
+        if (httpVersion != "HTTP/1.1")
+            throw std::runtime_error("Unsupported HTTP Version");
+
+        size_t queryPos = uri.find('?');
+        if (queryPos != std::string::npos)
+        {
+            std::string queryString = uri.substr(queryPos + 1);
+            uri = uri.substr(0, queryPos);
+            std::istringstream queryStream(queryString);
+            std::string param;
+            while (std::getline(queryStream, param, '&'))
+            {
+                size_t equalPos = param.find('=');
+                if (equalPos != std::string::npos)
+                    queryParams[param.substr(0, equalPos)] = param.substr(equalPos + 1);
+            }
+        }
+
+        uri = decodeURI(uri);
+        flag = 1;
+    }
+    // Parse headers
+    while (readLine(requestStream, line) && !line.empty())
+    {
+        std::istringstream headerLineStream(line);
+        std::string key, value;
+        if (std::getline(headerLineStream, key, ':') && std::getline(headerLineStream, value))
+        {
+            toLowerCase(key);
+            headers[key].push_back(value.substr(value.find_first_not_of(" ")));
+        }
+        else
+            throw std::runtime_error("Wrong header line");
+    }
+    if (headers.find("host") == headers.end() || headers["host"].empty())
+        throw std::runtime_error("Host header is missing");
+    if (headers.find("content-length") != headers.end() && headers["content-length"].empty())
+        throw std::runtime_error("Content-Length header is missing for POST request");
+    if ((headers.find("transfer-encoding") != headers.end() && headers["transfer-encoding"][0] != "chunked"))
+        throw std::runtime_error("transfer-encoding header is missing for POST request");
+    if (rawRequest.find("\r\n\r\n") != std::string::npos || rawRequest.find("\n\n") != std::string::npos)
+        headersComplete = true;
+}
+
+
+
+void Server::readFileContent(int fd, const std::string& filePath)
+{
+    //flag 0 open fie/flag 1
+    std::ifstream file;
+    if (flagstream == 0)
+    {
+        // file(filePath.c_str());
+        file.open(filePath.c_str());
+        // std::cout << filePath << std::endl;
+        if (!file)
+            exitWithError("Error: Unable to open file.");
+        flagstream = 1;
+    }
+    char p[1024];
+    file.read(p, 1024);
+
+    // while (file.gcount())
+    // {
+        std::stringstream ss;
+        ss << std::hex << file.gcount();
+        // std::cout << ss.str().c_str() << std::endl;
+        write(fd, ss.str().c_str(), ss.str().size());
+        write(fd, "\r\n", 2);
+        write(fd, p, file.gcount());
+        write(fd, "\r\n", 2);
+
+        file.read(p, 1024);
+    // }
+    write(fd, "0\r\n\r\n", 5);
+    file.close();
+}
+void Server::sendResponseChunk(int clientSocket, ResponseData& respData)
+{
+    if (respData.status == ResponseData::Complete)
+        return;
+    if (flagstream == 0)
+    {
+        // file(filePath.c_str());
+        respData.files.open(filePath.c_str());
+        // std::cout << filePath << std::endl;
+        if (!respData.files)
+            exitWithError("Error: Unable to open file.");
+        flagstream = 1;
+    }
+    char p[1024];
+    respData.files.read(p, 1024);
+
+    // while (file.gcount())
+    // {
+        std::stringstream ss;
+        ss << std::hex << respData.files.gcount();
+        // std::cout << ss.str().c_str() << std::endl;
+        write(clientSocket, ss.str().c_str(), ss.str().size());
+        write(clientSocket, "\r\n", 2);
+        write(clientSocket, p, respData.files.gcount());
+        write(clientSocket, "\r\n", 2);
+
+        respData.files.read(p, 1024);
+    // write(fd, "0\r\n\r\n", 5);
+    // }
+    // std::cout << "dkhal hna yarabi\n";
+    // size_t chunkSize = std::min(respData.responseBuffer.size() - respData.bytesSent, size_t(1024));
+
+    // // if (chunkSize > 0)
+    // // {
+    //     // std::stringstream chunkHeader;
+    //     // chunkHeader << std::hex << chunkSize << "\r\n";
+    //     // std::string chunkData = respData.responseBuffer.substr(respData.bytesSent, chunkSize) + "\r\n";
+    //     // send(clientSocket, chunkHeader.str().c_str(), chunkHeader.str().size(), 0);
+    //     send(clientSocket, respData.responseBuffer.c_str(), respData.responseBuffer.size(), 0);
+    //     respData.bytesSent += respData.responseBuffer.size();
+    // }
+
+    if (respData.responseBuffer.size() == 0)
+    {
+        std::string lastChunk = "0\r\n\r\n";
+        send(clientSocket, lastChunk.c_str(), lastChunk.size(), 0);
+        respData.status = ResponseData::Complete;
+        // respData.files.close();
+    }
+}
+
+
 void Server::run()
 {
     signal(SIGPIPE, SIG_IGN);
     struct epoll_event ev, events[MAX_EVENTS];
 
-        int nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, 10);
-        // std::cout << "hello\n";
-        if (nfds == -1)
+    int nfds = epoll_wait(epoll_fd, events, MAX_EVENTS, 10);
+    if (nfds == -1)
+    {
+        perror("epoll_wait");
+        exit(EXIT_FAILURE);
+    }
+    for (int n = 0; n < nfds; n++)
+    {
+        int current_fd = events[n].data.fd;
+        std::cout << "events: " << events[n].data.fd << std::endl;
+        if (current_fd == sockfd)
         {
-            perror("epoll_wait");
-            exit(EXIT_FAILURE);
-        }
-
-        for (int n = 0; n < nfds; n++)
-        {
-            int current_fd = events[n].data.fd;
-            std::cout << "events: " << events[n].data.fd << std::endl;
-            if (current_fd == sockfd)
+            struct sockaddr_in clientAddr;
+            socklen_t clientAddrLen = sizeof(clientAddr);
+            int new_socket = accept(sockfd, (struct sockaddr *)&clientAddr, &clientAddrLen);
+            if (new_socket < 0)
             {
-                struct sockaddr_in clientAddr;
-                socklen_t clientAddrLen = sizeof(clientAddr);
-                int new_socket = accept(sockfd, (struct sockaddr *)&clientAddr, &clientAddrLen);
-                if (new_socket < 0)
-                {
-                    perror("accept");
-                    continue;
-                }
-                setNonBlocking(new_socket);
-                ev.events = EPOLLIN | EPOLLET;
-                ev.data.fd = new_socket;
-                if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, new_socket, &ev) == -1)
-                {
-                    perror("epoll_ctl: new_socket");
-                    close(new_socket);
-                    exit(1);
-                }
-                client_socket[new_socket] = new_socket;
-                std::cout << "new clientfd: " << new_socket << std::endl;
-                requests[new_socket] = HTTPRequest();
+                perror("accept");
+                continue;
             }
-            else
+            setNonBlocking(new_socket);
+            ev.events = EPOLLIN | EPOLLOUT;
+            ev.data.fd = new_socket;
+            if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, new_socket, &ev) == -1)
             {
-                char buffer[1024];
-                int valread = read(current_fd, buffer, 1024);
-                if (valread > 0)
+                perror("epoll_ctl: new_socket");
+                close(new_socket);
+                exit(1);
+            }
+            client_socket[new_socket] = new_socket;
+            requests[new_socket] = HTTPRequest();
+            clientResponses[new_socket] = ResponseData();
+        }
+        else
+        {
+            if (events[n].events & EPOLLOUT && requests[current_fd].respense)
+            {
+                std::cout << "std: " << std::endl;
+                if (clientResponses.find(current_fd) != clientResponses.end())
                 {
-                    requests[current_fd].appendData(buffer, valread);
-                    if (requests[current_fd].isComplete())
+                    if (requests[current_fd].method == "GET")
+                        handleRequestGET(current_fd, requests[current_fd], serverConfig);
+                    else if (requests[current_fd].method == "DELETE")
+                        handleRequestDELETE(current_fd, requests[current_fd], serverConfig);
+                    ResponseData& respData = clientResponses[current_fd];
+                    if (respData.status == ResponseData::InProgress)
+                        sendResponseChunk(current_fd, respData);
+                    if (respData.status == ResponseData::Complete)
                     {
-                        try
-                        {
-                            requests[current_fd].parse(requests[current_fd].rawRequest);
-                            if (requests[current_fd].method == "GET")
-                                handleRequestGET(current_fd, requests[current_fd], serverConfig);
-                            else if (requests[current_fd].method == "POST")
-                                handleRequestPOST(current_fd, requests[current_fd]);
-                            else if (requests[current_fd].method == "DELETE")
-                                handleRequestDELETE(current_fd, requests[current_fd], serverConfig);
-                            else
-                                sendErrorResponse(current_fd, 501, "Not Implemented");
-                                requests[current_fd].clear();
-                        }
-                        catch (std::runtime_error& e)
-                        {
-                            sendErrorResponse(current_fd, 400, e.what());
-                        }
+                        requests[current_fd].clear();
+                        close(current_fd);
+                        client_socket[n] = 0;
+                        clientResponses.erase(current_fd);
                     }
                 }
-                else
+            }
+            else if (events[n].events & EPOLLIN && !requests[current_fd].respense)
+            {
+                try
                 {
-                        close(current_fd);
-                        client_socket[n] = -1;
-                        requests.erase(current_fd);
+                    if (!requests[current_fd].headersComplete)
+                        requests[current_fd].readHeaders(current_fd, requests[current_fd]);
+                    if (requests[current_fd].headersComplete)
+                    {
+                        if (requests[current_fd].method == "GET" || requests[current_fd].method == "DELETE")
+                            requests[current_fd].respense = true;
+                        else if (requests[current_fd].method == "POST")
+                            handleRequestPOST(current_fd, requests[current_fd]);
+                        else
+                        {
+                            sendErrorResponse(current_fd, 501, "Not Implemented");
+                            requests[current_fd].clear();
+                        }
+                        // requests[current_fd].clear();
+                        // close(current_fd);
+                        // client_socket[n] = 0;
+                        // requests.erase(current_fd);
+                    }
+                }
+                catch (std::runtime_error& e)
+                {
+                    sendErrorResponse(current_fd, 400, e.what());
                 }
             }
         }
+    }
 }
 
 
